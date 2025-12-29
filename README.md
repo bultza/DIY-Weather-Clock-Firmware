@@ -8,13 +8,8 @@ or AliExpress. The kit includes a plexiglass structure and three PCB boards:
 - An interface PCB that is usually hand-soldered
 
 <div align="center">
-<img src="docs/photo_clock.jpg" alt="Picture of the Clock face" width="70%"/>
-<br/>Clock Face
-</div>
-
-<div align="center">
-<img src="docs/photo_clock_weather.jpg" alt="Picture of the Weather face" width="70%"/>
-<br/>Weather Face
+<img src="docs/photo_clock_composition.jpg" alt="Picture of the Clock and Weather face" width="80%"/>
+<br/>Clock Face on the left, Weather face on the right
 </div>
 
 ## Why
