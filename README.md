@@ -69,10 +69,8 @@ automatically without rebooting.
 - Proper timezone handling with automatic DST
 - Optional seconds display
 - Support for cities with spaces and special characters
-- Robust Wi-Fi reconnection
 - Weather hidden when not available
-- Cleaner EEPROM layout with versioned signature
-- Much more predictable and debuggable behavior
+- More predictable behavior
 
 
 ## What you need to compile and install
