@@ -4,7 +4,7 @@ Firmware for the DIY Weather Clock WiFi kit with ESP8266 and a OLED display from
 ## Why
 TBC
 
-##How it works
+## How it works
 TBC
 
 ## What do you need to compile and install
