@@ -9,12 +9,12 @@ or AliExpress. The kit includes a plexiglass structure and three PCB boards:
 
 <div align="center">
 <img src="docs/photo_clock.jpg" alt="Picture of the Clock face" width="70%"/>
-Clock Face
+<br/>Clock Face
 </div>
 
 <div align="center">
 <img src="docs/photo_clock_weather.jpg" alt="Picture of the Weather face" width="70%"/>
-Weather Face
+<br/>Weather Face
 </div>
 
 ## Why
@@ -49,7 +49,7 @@ If the signature is not found:
 
 <div align="center">
 <img src="docs/ESP8266_web_config.png" alt="Screenshot of the configuration website" width="50%"/>
-Configuration web screenshot
+<br/>Configuration web screenshot
 </div>
 Once configured and rebooted:
 
@@ -99,7 +99,7 @@ Hardware:
 
 <div align="center">
 <img src="docs/photo_programming_02.jpg" alt="Picture of the ESP-01 USB adapter board with the ESP-01 connected and the GPIO0 connected to GND to enter in programming mode" width="70%"/>
-ESP-01 USB adapter board with the ESP-01 connected and the GPIO0 connected to GND to enter in programming mode.
+<br/>ESP-01 USB adapter board with the ESP-01 connected and the GPIO0 connected to GND to enter in programming mode.
 </div>
 
 Software:
