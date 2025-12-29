@@ -86,9 +86,11 @@ Hardware:
   - This can cause random behavior when installed on the Clock.
   - Fix: solder a 12 kΩ pull-up resistor between GPIO2 and 3.3V
 
-[!WARNING] Warning : FTDI you must configure it to 3.3V
-[!WARNING] Warning : GPIO0 must be connected to GND at power up to enter in UART Flashing mode. See image attached here.
-[!WARNING] Warning : GPIO2 needs a 12kohm pullup if you use another ESP-01 module that is not coming from the clock DIY kit.
+> :warning: FTDI you must configure it to 3.3V
+
+> :warning: GPIO0 must be connected to GND at power up to enter in UART Flashing mode. See image attached here.
+
+> :warning: GPIO2 needs a 12kohm pullup if you use another ESP-01 module that is not coming from the clock DIY kit.
 
 <div align="center">
 <img src="docs/photo_programming_02.jpg" alt="Picture of the ESP-01 USB adapter board with the ESP-01 connected and the GPIO0 connected to GND to enter in programming mode" width="70%"/>
@@ -114,11 +116,10 @@ Software:
 - Compile and upload the firmware
 
 
-## Resources & Thanks
+## Resources
 - Original firmware and inspiration: https://www.whynot.org.ua/en/electronic-kits/hu-061-diy-kit-wi-fi-weather-forecast-clock
 - Huge thanks to wttr.in for providing free weather data: https://github.com/chubin/wttr.in
 - In your source website for DIY projects just search for "ESP8266 DIY" or "weather clock diy" to find the hardware, usually for less than 10€
 
 Simple clock, honest code.
 Less magic, more control.
-
