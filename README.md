@@ -8,11 +8,13 @@ or AliExpress. The kit includes a plexiglass structure and three PCB boards:
 - An interface PCB that is usually hand-soldered
 
 <div align="center">
-<img src="docs/photo_clock.png" alt="Picture of the Clock face" width="70%"/>
+<img src="docs/photo_clock.jpg" alt="Picture of the Clock face" width="70%"/>
+Clock Face
 </div>
 
 <div align="center">
-<img src="docs/photo_clock_weather.png" alt="Picture of the Weather face" width="70%"/>
+<img src="docs/photo_clock_weather.jpg" alt="Picture of the Weather face" width="70%"/>
+Weather Face
 </div>
 
 ## Why
@@ -46,7 +48,8 @@ If the signature is not found:
   - Seconds display
 
 <div align="center">
-<img src="docs/ESP8266_web_config.png" alt="Screenshot of the configuration website" width="70%"/>
+<img src="docs/ESP8266_web_config.png" alt="Screenshot of the configuration website" width="50%"/>
+Configuration web screenshot
 </div>
 Once configured and rebooted:
 
@@ -95,8 +98,8 @@ Hardware:
 [!WARNING] Warning : GPIO2 needs a 12kohm pullup if you use another ESP-01 module that is not coming from the clock DIY kit.
 
 <div align="center">
-<img src="docs/photo_programming_02.png" alt="Picture of the ESP-01 USB adapter board with the ESP-01 connected and the GPIO0 connected to GND to enter in programming mode" width="70%"/>
-Picture of the ESP-01 USB adapter board with the ESP-01 connected and the GPIO0 connected to GND to enter in programming mode
+<img src="docs/photo_programming_02.jpg" alt="Picture of the ESP-01 USB adapter board with the ESP-01 connected and the GPIO0 connected to GND to enter in programming mode" width="70%"/>
+ESP-01 USB adapter board with the ESP-01 connected and the GPIO0 connected to GND to enter in programming mode.
 </div>
 
 Software:
