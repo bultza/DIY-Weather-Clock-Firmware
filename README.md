@@ -1,8 +1,11 @@
 # DIY-Weather-Clock-Firmware
-Firmware for the DIY Weather Clock WiFi kit that you can easily find in Amazon or Aliexpress. The kit comes with a plexyglass structure and three PCB boards:
-* An ESP-01S with a ESP8266 MCU
-* An OLED display from Adafruit 0.96" 128x64px
-* An interface board that you would usually manually solder
+
+Firmware for the DIY Weather Clock WiFi kit that can be easily found on Amazon
+or AliExpress. The kit includes a plexiglass structure and three PCB boards:
+
+- An ESP-01S module with an ESP8266 MCU
+- An Adafruit OLED display (0.96", 128x64 px)
+- An interface PCB that is usually hand-soldered
 
 <div align="center">
 <img src="docs/photo_clock.png" alt="Picture of the Clock face" width="70%"/>
@@ -13,36 +16,83 @@ Firmware for the DIY Weather Clock WiFi kit that you can easily find in Amazon o
 </div>
 
 ## Why
-This kit comes already with a ready to use firmware, however you must register in a website and ... you don't have control of what is really doing. In the WHYNOT blog you can find more information. This firmware comes in reallity from that blog post and I have modified it to fix a few corner cases and to allow easier configuration. (For example imperial, metric and Summer timezones support).
+This kit already ships with a ready-to-use firmware, but it requires registering
+on an external website and you have no real control over what the firmware does
+or what data it sends.
+
+In the original WHYNOT blog you can find more information about this kit and its
+firmware. This project started as a fork of that firmware, and has been heavily
+modified and cleaned up to:
+
+- remove external dependencies
+- fix several corner cases
+- add proper configuration and robustness
+- support metric / imperial units
+- support real automatic daylight-saving time (DST)
 
 ## How it works
-The first time you boot the firmware it will search for a magic word in the EEPROM. If not found it will launch in Access Point mode with all the detailed information in the display. Then you connect to it and via a website you configure to which WiFi network it should connect, the city (to retrieve the weather) and a couple of other things.
+
+On first boot, the firmware looks for a magic signature in EEPROM.
+
+If the signature is not found:
+- The device starts in Access Point (AP) mode
+- The OLED shows connection instructions
+- You connect to the AP and open the configuration web portal
+- You configure:
+  - Wi-Fi credentials
+  - City (used for weather)
+  - Timezone (preset or manual)
+  - Metric / imperial units
+  - Seconds display
 
 <div align="center">
 <img src="docs/ESP8266_web_config.png" alt="Screenshot of the configuration website" width="70%"/>
 </div>
+Once configured and rebooted:
 
-If correctly configured, the second time it will connect to your WiFi network and automatically it will sync the time with the typical pool servers and it will retrieve the weather. The clock will connect to wttr.in and retrieve the weather every 15 minutes.
+- The clock connects to your Wi-Fi network
+- Time is synchronized using NTP pool servers
+- Timezone handling uses proper DST rules (not fixed offsets)
+- Weather data is retrieved from wttr.in every 15 minutes
 
-Every 15s the screen will toogle between Clock and Weather. If the weather retrieval fails, it will only display the clock.
+Every 15 seconds the display toggles between:
+- Clock view
+- Weather view
+
+If weather retrieval fails (no internet, server down, etc.), the device keeps
+showing the clock only.
+
+If the internet goes away for hours and later comes back, the ESP reconnects
+automatically without rebooting.
 
 ## Changes from the original firmware
-* Metric and Imperial selection
-* Timezones with automatic summer time correction
-* Seconds display
-* Cities with "spaces" and especial characters in the name
-* Weather not shown if not available
+
+- Metric / Imperial units selection
+- Proper timezone handling with automatic DST
+- Optional seconds display
+- Support for cities with spaces and special characters
+- Robust Wi-Fi reconnection
+- Weather hidden when not available
+- Cleaner EEPROM layout with versioned signature
+- Much more predictable and debuggable behavior
 
 
-## What do you need to compile and install
+## What you need to compile and install
+
 Hardware:
-* You could make it with a FTDI (3.3V!) but it is so convenient just to buy the ESP-01 USB adapter and it would be plug an play (almost)
- * Warning. If you buy the ESP-01 USB adapter with other ESP-01 modules, some of them do not have the 12kohm pullup on the GPIO2, so it will behave randomly on the clock. You can easily solve this soldering a 12kohm resistor between the GPIO2 and 3.3V on the PCB adapter board.
-* You need to boot the ESP in UART Flash mode when you want to reflash. Remember this is done by connecting GPIO0 to GND during power up.
 
-Add warning icon that using a FTDI you must configure it to 3.3V
-Add warning icon that GPIO0 must be connected to GND at power up to enter in UART Flashing mode. See image attached here.
-Add warning icon that GPIO2 needs a 12kohm pullup if you use another ESP-01 module that is not coming from the clock DIY kit.
+- You can use a generic FTDI adapter, but it MUST be set to 3.3V
+  (never use 5V, you will kill the ESP-01)
+- Much easier: use an ESP-01 USB adapter
+- To flash the firmware, the ESP must be in UART flash mode:
+  - GPIO0 connected to GND during power-up
+- Some ESP-01 boards (if you don't use the original) do not include a pull-up on GPIO2
+  - This can cause random behavior when installed on the Clock.
+  - Fix: solder a 12 kΩ pull-up resistor between GPIO2 and 3.3V
+
+[!WARNING] Warning : FTDI you must configure it to 3.3V
+[!WARNING] Warning : GPIO0 must be connected to GND at power up to enter in UART Flashing mode. See image attached here.
+[!WARNING] Warning : GPIO2 needs a 12kohm pullup if you use another ESP-01 module that is not coming from the clock DIY kit.
 
 <div align="center">
 <img src="docs/photo_programming_02.png" alt="Picture of the ESP-01 USB adapter board with the ESP-01 connected and the GPIO0 connected to GND to enter in programming mode" width="70%"/>
@@ -50,23 +100,29 @@ Picture of the ESP-01 USB adapter board with the ESP-01 connected and the GPIO0 
 </div>
 
 Software:
-* Download and install Arduino IDE: https://www.arduino.cc/en/software/
-* Install the ESP8266 package:
-  * File -> Preferences
-  * In Additional Boards Manager URLs, add this: https://arduino.esp8266.com/stable/package_esp8266com_index.json
-  * Tools -> Board -> Boards Manager...
-  * Search ESP8266
-  * Install "esp8266 by ESP8266 Community"
-  * Go to Tools → Board and choose: "Generic ESP8266 Module"
-* Clone this repository in your Arduino Sketch folder :-D
-* Install the required libraries on the Arduino IDE -> Icon libraries -> search and install:
- * Adafruit SSD1306 by Adafruit
- * Adafruit GFX Library by Adafruit
- * Any other dependencies that the previous 2 create.
-* Compile and upload the code.
+- Download and install Arduino IDE: https://www.arduino.cc/en/software/
+
+- Install the ESP8266 board package:
+  - File -> Preferences
+  - Add to "Additional Boards Manager URLs": https://arduino.esp8266.com/stable/package_esp8266com_index.json
+  - Tools -> Board -> Boards Manager...
+  - Search for ESP8266
+  - Install "esp8266 by ESP8266 Community"
+  - Select board: "Generic ESP8266 Module"
+
+- Clone this repository into your Arduino sketch folder
+- Install required libraries using the Arduino Library Manager:
+  - Adafruit SSD1306 (by Adafruit)
+  - Adafruit GFX Library (by Adafruit)
+  - Any dependencies pulled by those libraries
+- Compile and upload the firmware
 
 
 ## Resources & Thanks
-* This firmware is a fork from the original (awesome and thank you so much) one that you can find here: https://www.whynot.org.ua/en/electronic-kits/hu-061-diy-kit-wi-fi-weather-forecast-clock
-* Also thank you so much to wttr.in for providing weather information all over the world for free: https://github.com/chubin/wttr.in
-* Aliexpress 
+- Original firmware and inspiration: https://www.whynot.org.ua/en/electronic-kits/hu-061-diy-kit-wi-fi-weather-forecast-clock
+- Huge thanks to wttr.in for providing free weather data: https://github.com/chubin/wttr.in
+- In your source website for DIY projects just search for "ESP8266 DIY" or "weather clock diy" to find the hardware, usually for less than 10€
+
+Simple clock, honest code.
+Less magic, more control.
+
