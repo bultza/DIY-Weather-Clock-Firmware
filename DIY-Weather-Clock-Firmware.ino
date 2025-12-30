@@ -93,6 +93,9 @@ String weatherHum = "";
 String weatherWind = "";
 String weatherPress = "";
 bool weatherValid = false;
+time_t weatherLastSuccessfulUpdate = 0;
+
+static const uint32_t REBOOT_AFTER_MS = 49UL * 24UL * 60UL * 60UL * 1000UL;
 
 // Function prototypes:
 void loadSettings();
@@ -240,6 +243,15 @@ void setup()
 
 void loop() 
 {
+  time_t now = millis();
+
+  //Reboot after 49 days of continues use, to avoid millis() rollover problems :-D
+  if (now > REBOOT_AFTER_MS) 
+  {
+    Serial.println(F("Uptime > 49 days, rebooting to avoid millis() rollover"));
+    delay(100);
+    ESP.restart();
+  }
   // If in config portal mode, handle web server
   if (WiFi.getMode() == WIFI_AP) 
   {
@@ -247,8 +259,6 @@ void loop()
     // In AP mode, do not run normal display loop
     return;
   }
-
-  unsigned long now = millis();
 
   // Switch screen every 15 seconds
   if (now - lastScreenSwitch > 15000) 
@@ -991,12 +1001,39 @@ static String urlEncode(const String& s)
   return out;
 }
 
+bool getWeatherExpired()
+{
+  //This function is called only when the getWeather from wttr.in failed. If we have
+  //good weather from previous calls (less than 90minutes ago) we do not declare it
+  //as not valid
+  time_t now = millis();
+
+  if(weatherLastSuccessfulUpdate == 0)
+  {
+    Serial.println("Fetching weather data failed and we never got a valid data :(. Expired!");
+    return false; // We never got a valid weather :(
+  }
+
+  if(weatherLastSuccessfulUpdate + 5400000UL > now)
+  {
+    Serial.println("Fetching weather data failed but previous stored data did not expired. So we keep the data :-D");
+    Serial.print(F("Temp=")); Serial.println(weatherTemp);
+    Serial.print(F("Cond=")); Serial.println(weatherCond);
+    Serial.print(F("Hum=")); Serial.println(weatherHum);
+    Serial.print(F("Wind=")); Serial.println(weatherWind);
+    Serial.print(F("Pressure=")); Serial.println(weatherPress);
+    return true;  // Last update was < 90 minutes ago, so it is still valid.
+  }
+
+  Serial.println("Weather data expired! :((((");
+  return false;
+}
 
 bool getWeather() 
 {
   if (WiFi.status() != WL_CONNECTED) {
     Serial.println(F("WiFi not connected, cannot get weather."));
-    return false;
+    return getWeatherExpired();
   }
 
   WiFiClientSecure client;
@@ -1025,7 +1062,7 @@ bool getWeather()
   if (!client.connect(host, 443)) 
   {
     Serial.println(F("Connection failed."));
-    return false;
+    return getWeatherExpired();
   }
 
   // Send GET request
@@ -1090,7 +1127,7 @@ bool getWeather()
 
   if (result.length() == 0) {
     Serial.println(F("No weather data found."));
-    return false;
+    return getWeatherExpired();
   }
 
   // Parse fields: temp|cond|hum|wind|press
@@ -1098,7 +1135,8 @@ bool getWeather()
   int idx2 = result.indexOf('|', idx1 + 1);
   int idx3 = result.indexOf('|', idx2 + 1);
   int idx4 = result.indexOf('|', idx3 + 1);
-  if (idx1 < 0 || idx2 < 0 || idx3 < 0 || idx4 < 0) return false;
+  if (idx1 < 0 || idx2 < 0 || idx3 < 0 || idx4 < 0) 
+    return getWeatherExpired();
 
   String tempStr   = result.substring(0, idx1);
   String condStr   = result.substring(idx1 + 1, idx2);
@@ -1106,45 +1144,43 @@ bool getWeather()
   String windStr   = result.substring(idx3 + 1, idx4);
   String pressStr  = result.substring(idx4 + 1);
 
-  tempStr.trim();
-  weatherTemp = tempStr; // keep + or - sign if present and the Degree
-
   // Clean Condition:
+  tempStr.trim();
   condStr.trim();
-  weatherCond = condStr;
-
   // Clean Humidity: ensure '%' present
   humStr.trim();
-  weatherHum = humStr;
 
   if (windStr.length() == 0) 
   {
-    weatherWind = "N/A";
+    windStr = "N/A";
   } 
-  else 
-  {
-    weatherWind = windStr;
-  }
 
   if(pressStr.length() == 0) 
   {
-    weatherPress = "N/A";
+    pressStr = "N/A";
   } 
-  else 
-  {
-    weatherPress = pressStr;
-  }
 
   Serial.println(F("Parsed weather data:"));
-  Serial.print(F("Temp=")); Serial.println(weatherTemp);
-  Serial.print(F("Cond=")); Serial.println(weatherCond);
-  Serial.print(F("Hum=")); Serial.println(weatherHum);
-  Serial.print(F("Wind=")); Serial.println(weatherWind);
-  Serial.print(F("Pressure=")); Serial.println(weatherPress);
+  Serial.print(F("Temp=")); Serial.println(tempStr);
+  Serial.print(F("Cond=")); Serial.println(condStr);
+  Serial.print(F("Hum=")); Serial.println(humStr);
+  Serial.print(F("Wind=")); Serial.println(windStr);
+  Serial.print(F("Pressure=")); Serial.println(pressStr);
 
   // Validate critical fields
-  if (weatherTemp == "" || weatherCond == "") {
-    return false;
+  if (tempStr == "" || condStr == "") 
+  {
+    return getWeatherExpired();
   }
+
+  //Data is valid!!!
+
+  weatherTemp = tempStr; // keep + or - sign if present and the Degree
+  weatherCond = condStr;
+  weatherHum = humStr;
+  weatherWind = windStr;
+  weatherPress = pressStr;
+  weatherLastSuccessfulUpdate = millis();   //Register when we did get the last weather update
+
   return true;
 }
