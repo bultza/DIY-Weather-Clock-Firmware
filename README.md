@@ -1,6 +1,6 @@
 # DIY-Weather-Clock-Firmware
 
-Firmware for the DIY Weather Clock WiFi kit that can be easily found on Amazon
+This is an Alternative firmware for the DIY Weather Clock WiFi kit that can be easily found on Amazon
 or AliExpress. The kit includes a plexiglass structure and three PCB boards:
 
 - An ESP-01S module with an ESP8266 MCU
@@ -17,7 +17,7 @@ This kit already ships with a ready-to-use firmware, but it requires registering
 on an external website and you have no real control over what the firmware does
 or what data it sends.
 
-In the original WHYNOT blog you can find more information about this kit and its
+In the original [WHYNOT blog](https://www.whynot.org.ua/en/electronic-kits/hu-061-diy-kit-wi-fi-weather-forecast-clock) you can find more information about this kit and its
 firmware. This project started as a fork of that firmware, and has been heavily
 modified and cleaned up to:
 
@@ -33,7 +33,7 @@ On first boot, the firmware looks for a magic signature in EEPROM.
 
 If the signature is not found:
 - The device starts in Access Point (AP) mode
-- The OLED shows connection instructions
+- The OLED display shows connection instructions
 - You connect to the AP and open the configuration web portal
 - You configure:
   - Wi-Fi credentials
@@ -79,7 +79,7 @@ Hardware:
 
 - You can use a generic FTDI adapter, but it MUST be set to 3.3V
   (never use 5V, you will kill the ESP-01)
-- Much easier: use an ESP-01 USB adapter
+- Much easier: use an ESP-01 USB adapter (cheap to find in internet)
 - To flash the firmware, the ESP must be in UART flash mode:
   - GPIO0 connected to GND during power-up
 - Some ESP-01 boards (if you don't use the original) do not include a pull-up on GPIO2
