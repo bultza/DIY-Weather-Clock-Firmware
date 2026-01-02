@@ -35,6 +35,8 @@
 //#include <Fonts/FreeMonoBold16pt7b.h>
 //#include <Fonts/FreeMonoBold14pt7b.h>
 #include <Fonts/FreeMonoBold12pt7b.h>
+#include <Fonts/TomThumb.h> //Smallest font available
+#include <Fonts/FreeSans9pt7b.h>  //Small cute font
 #include <time.h>
 
 // Pin definitions (ESP-01):
@@ -81,10 +83,16 @@ String config_wifiSSID = "";
 String config_wifiPass = "";
 String config_city = "";
 //int timezoneOffset = 0;  // in seconds
-bool config_showSeconds = false;
-bool config_imperial = false;
-String config_timezone = "CET-1CEST,M3.5.0/2,M10.5.0/3";
-bool config_timezone_manual = false;
+bool     config_showSeconds       = false;
+bool     config_imperial          = false;
+String   config_timezone          = "CET-1CEST,M3.5.0/2,M10.5.0/3";
+bool     config_timezone_manual   = false;
+bool     config_variableContrast  = false;
+uint8_t  config_dayContrast       = 255;
+uint8_t  config_nightContrast     = 10;
+uint16_t config_dawnDuskDuration  = 30;  //minutes
+uint32_t config_sunRise           = 25200;  //in seconds 7h in the morning
+uint32_t config_sunSet            = 75600;   //in seconds 21h at night
 
 // Weather data variables:
 String weatherTemp = "N/A";
@@ -126,7 +134,7 @@ void setup()
     display.setRotation(2);
     display.clearDisplay();
     display.setTextColor(SSD1306_WHITE);
-    display.print("Booting...");
+    display.println("Booting...");
     display.display();
     displayReady = true;
   } 
@@ -204,6 +212,7 @@ void setup()
     Serial.print(F("Connecting to WiFi: "));
     Serial.println(config_wifiSSID);
     display.println("Connecting to WiFi...");
+    display.display();
     WiFi.mode(WIFI_STA);
     WiFi.begin(config_wifiSSID.c_str(), config_wifiPass.c_str());
     // Wait up to 30 seconds for connection
@@ -223,7 +232,7 @@ void setup()
     else 
     {
       Serial.println(F("WiFi connection failed. Starting AP mode instead."));
-      startConfigPortal("WiFi connection failed.");
+      startConfigPortal("WiFi connect failed!");
       rebootIn10mins = true;
       return; // Exit setup to avoid running normal mode without WiFi
     }
@@ -433,18 +442,21 @@ void startConfigPortal(String errorMessage)
   {
     display.clearDisplay();
     display.setTextColor(SSD1306_WHITE);
-    display.setTextSize(1);
+    //display.setFont(&TomThumb); //the smallest font available
+    //display.setCursor(0, 16);
     display.setCursor(0, 0);
+    display.setTextSize(1);
+    //display.print("Error message: ");
     display.println(errorMessage);
-    display.setCursor(0, 10);
-    display.println("AP mode");
-    display.setCursor(0, 20);
+    display.println("----------------");
+    display.println("AP mode for config");
+    //display.setCursor(0, 20);
     display.print("SSID: ");
     display.println(AP_SSID);
-    display.setCursor(0, 30);
+    //display.setCursor(0, 30);
     display.print("PASSWD: ");
     display.println(AP_PASSWD);
-    display.setCursor(0, 40);
+    //display.setCursor(0, 40);
     display.print("IP: ");
     display.println(apIP);
     display.display();
@@ -1080,10 +1092,15 @@ bool getWeather()
   String cityEnc = urlEncode(config_city);
   // Base query
   String query = "?format=%25t|%25C|%25h|%25w|%25P";
+  //query += "|%25D|%25S|%25s|%25d";
   // Add imperial units if configured
   if (config_imperial) 
   {
-    query += "&u";
+    query += "&lang=en&u";
+  }
+  else
+  {
+    query += "&lang=en&m";
   }
   String url = "/" + cityEnc + query;
 
@@ -1167,7 +1184,7 @@ bool getWeather()
     return getWeatherExpired();
   }
 
-  // Parse fields: temp|cond|hum|wind|press
+  // Parse fields: temp|cond|hum|wind|press|Dawn|Sunrise|Sunset|Dusk
   int idx1 = result.indexOf('|');
   int idx2 = result.indexOf('|', idx1 + 1);
   int idx3 = result.indexOf('|', idx2 + 1);
