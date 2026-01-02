@@ -381,6 +381,25 @@ void debugTZ()
   Serial.println(offset);
 }
 
+static String htmlEscape(const String& s)
+{
+  String out;
+  out.reserve(s.length());
+
+  for (size_t i = 0; i < s.length(); i++) {
+    char c = s[i];
+    switch (c) {
+      case '&':  out += F("&amp;");  break;
+      case '<':  out += F("&lt;");   break;
+      case '>':  out += F("&gt;");   break;
+      case '"':  out += F("&quot;"); break;
+      case '\'': out += F("&#39;");  break;
+      default:   out += c;           break;
+    }
+  }
+  return out;
+}
+
 void startConfigPortal() 
 {
   // Stop any existing WiFi and start AP
@@ -442,15 +461,15 @@ void startConfigPortal()
 
     // WiFi SSID field
     page += "<div class='row'><label for='ssid'>Wi-Fi SSID:</label>";
-    page += "<input id='ssid' type='text' name='ssid' value='" + config_wifiSSID + "' required></div>";
+    page += "<input id='ssid' type='text' name='ssid' value='" + htmlEscape(config_wifiSSID) + "' required></div>";
 
     // Password field
     page += "<div class='row'><label for='pass'>Password:</label>";
-    page += "<input id='pass' type='password' name='pass' value='" + config_wifiPass + "' placeholder=''></div>";
+    page += "<input id='pass' type='password' name='pass' value='" + htmlEscape(config_wifiPass) + "' placeholder=''></div>";
 
     // City field
     page += "<div class='row'><label for='city'>City:</label>";
-    page += "<input id='city' type='text' name='city' value='" + config_city + "' required></div>";
+    page += "<input id='city' type='text' name='city' value='" + htmlEscape(config_city) + "' required></div>";
 
     // Timezone select
     page += "<div class='row'><label for='tz'>Timezone:</label>";
@@ -493,7 +512,7 @@ void startConfigPortal()
     page += "placeholder='e.g. CET-1CEST,M3.5.0/2,M10.5.0/3' ";
     // If manual is enabled, show the stored TZ string; otherwise keep it empty
     page += "value='";
-    if (config_timezone_manual) page += config_timezone;
+    if (config_timezone_manual) page += htmlEscape(config_timezone);
     page += "'>";
     page += "</div>";
 
