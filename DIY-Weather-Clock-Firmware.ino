@@ -96,11 +96,12 @@ bool weatherValid = false;
 time_t weatherLastSuccessfulUpdate = 0;
 
 static const uint32_t REBOOT_AFTER_MS = 49UL * 24UL * 60UL * 60UL * 1000UL;
+bool rebootIn10mins = false;
 
 // Function prototypes:
 void loadSettings();
 void saveSettings();
-void startConfigPortal();
+void startConfigPortal(String errorMessage);
 void handleConfigForm();
 void drawTimeScreen();
 void drawWeatherScreen();
@@ -112,6 +113,7 @@ void debugTZ();
 
 void setup() 
 {
+  String errorMessageDisplay = "";
   Serial.begin(115200);
   Serial.println();
   Serial.println(F("Booting..."));
@@ -150,6 +152,7 @@ void setup()
   else 
   {
     Serial.println(F("No config signature found (EEPROM uninitialized)."));
+    errorMessageDisplay = "No valid configuration found!";
   }
 
   // Check button press in first 300ms of boot
@@ -160,6 +163,7 @@ void setup()
     if (digitalRead(BUTTON_PIN) == LOW) 
     {
       buttonPressed = true;
+      errorMessageDisplay = "Reset button pressed!";
     }
     delay(10);
   }
@@ -189,7 +193,7 @@ void setup()
       loadSettings();
     }
     // Start configuration portal (Access Point mode)
-    startConfigPortal();
+    startConfigPortal(errorMessageDisplay);
     // After configuration, ESP will reboot. If not rebooted (e.g. user didn't submit),
     // it will remain in AP mode and handleClient in loop.
   } 
@@ -199,6 +203,7 @@ void setup()
     loadSettings();
     Serial.print(F("Connecting to WiFi: "));
     Serial.println(config_wifiSSID);
+    display.println("Connecting to WiFi...");
     WiFi.mode(WIFI_STA);
     WiFi.begin(config_wifiSSID.c_str(), config_wifiPass.c_str());
     // Wait up to 30 seconds for connection
@@ -218,7 +223,8 @@ void setup()
     else 
     {
       Serial.println(F("WiFi connection failed. Starting AP mode instead."));
-      startConfigPortal();
+      startConfigPortal("WiFi connection failed.");
+      rebootIn10mins = true;
       return; // Exit setup to avoid running normal mode without WiFi
     }
     setupTimeWithDST();
@@ -255,6 +261,16 @@ void loop()
   // If in config portal mode, handle web server
   if (WiFi.getMode() == WIFI_AP) 
   {
+    //If more than 10min reboot:
+    if(rebootIn10mins)
+    {
+      if (now > 600000)
+      {
+        Serial.println(F("Uptime > 10 minutes and no Wifi was connected so we reboot..."));
+        delay(100);
+        ESP.restart();
+      }
+    }
     server.handleClient();
     // In AP mode, do not run normal display loop
     return;
@@ -400,7 +416,7 @@ static String htmlEscape(const String& s)
   return out;
 }
 
-void startConfigPortal() 
+void startConfigPortal(String errorMessage)
 {
   // Stop any existing WiFi and start AP
   // Password is in AP_PASSWD
@@ -419,14 +435,16 @@ void startConfigPortal()
     display.setTextColor(SSD1306_WHITE);
     display.setTextSize(1);
     display.setCursor(0, 0);
-    display.println("AP mode");
+    display.println(errorMessage);
     display.setCursor(0, 10);
+    display.println("AP mode");
+    display.setCursor(0, 20);
     display.print("SSID: ");
     display.println(AP_SSID);
-    display.setCursor(0, 20);
+    display.setCursor(0, 30);
     display.print("PASSWD: ");
     display.println(AP_PASSWD);
-    display.setCursor(0, 30);
+    display.setCursor(0, 40);
     display.print("IP: ");
     display.println(apIP);
     display.display();
