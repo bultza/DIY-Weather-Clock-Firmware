@@ -249,7 +249,9 @@ void setup()
     weather_valid = false;
     Serial.println(F("Setup complete, entering loop."));
   }
-  Serial.println(F("Getting initial weather..."));
+  Serial.println(F("Fetching initial weather..."));
+  display.println("Fetching weather...");
+  display.display();
   weather_valid = getWeather();
   lastWeatherFetch = millis();
   if (weather_valid) 
@@ -1389,7 +1391,7 @@ void drawTimeScreen()
   }
   display.setFont(NULL); // default font
   int16_t x1, y1;
-  uint16_t w, h;
+  uint16_t w, h, w2, h2;
   display.getTextBounds(dayName, 0, 0, &x1, &y1, &w, &h);
   // center horizontally
   int dayX = (128 - w) / 2;
@@ -1397,8 +1399,8 @@ void drawTimeScreen()
   display.print(dayName);
   if(config_showSeconds)
   {
-    // Time HH:MM in large font, centered
-    display.setFont(&FreeMonoBold12pt7b);
+    // Time HH:MM in large font, and :ss in small font
+    /*display.setFont(&FreeMonoBold12pt7b);
     // Format time as HH:MM:SS
     char timeBuf[9];
     snprintf(timeBuf, sizeof(timeBuf), "%02d:%02d:%02d", timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec);
@@ -1408,7 +1410,32 @@ void drawTimeScreen()
     // Vertically center the text around mid (y=32)
     int timeY = 32 + (h / 2);
     display.setCursor(timeX, timeY);
+    display.print(timeStr);*/
+
+    
+    // Format time as HH:MM
+    char timeBuf[6];
+    char secBuf[5];
+    snprintf(timeBuf, sizeof(timeBuf), "%02d:%02d", timeinfo.tm_hour, timeinfo.tm_min);
+    snprintf(secBuf, sizeof(secBuf), " :%02d", timeinfo.tm_sec);
+    String timeStr = String(timeBuf);
+    String secStr = String(secBuf);
+    display.getTextBounds(secStr, 0, 0, &x1, &y1, &w2, &h2);
+    //w2 and h2 contains the size of the seconds
+    
+    display.setFont(&FreeMonoBold18pt7b);
+    display.getTextBounds(timeStr, 0, 30, &x1, &y1, &w, &h);
+    int timeX = (128 - w - w2) / 2;
+    // Vertically center the text around mid (y=32)
+    int timeY = 32 + (h / 2);
+    display.setCursor(timeX, timeY);
     display.print(timeStr);
+
+    // Bottom right: seconds
+    display.setFont(NULL);
+    //display.setCursor(timeX + w, timeY - h + h2 /*+ h - h2*/);
+    display.setCursor(timeX + w, timeY - h2 + 2);
+    display.print(secBuf);
   }
   else
   {
