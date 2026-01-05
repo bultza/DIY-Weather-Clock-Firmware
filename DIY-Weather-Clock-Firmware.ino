@@ -50,8 +50,8 @@ const int ADDR_SSID = 0;
 const int ADDR_PASS = 70;
 const int ADDR_CITY = 140;
 const int ADDR_TZ   = 210;  //timezone offset
-const int ADDR_BOOLEANS = 300;
-#define DEVICE_SIGNATURE '1'  //Change this byte to force the clock to ignore the current EEPROM configuration
+const int ADDR_VARIABLES = 300;
+#define DEVICE_SIGNATURE '2'  //Change this byte to force the clock to ignore the current EEPROM configuration
 const int ADDR_SIGNATURE = 500;  // 4-byte signature "CFGx" to indicate valid config, the "x" is the DEVICE_SIGNATURE define
 
 // Wi-Fi and server:
@@ -79,29 +79,33 @@ const unsigned long RESYNC_MS = 15UL * 60UL * 1000UL;
 unsigned long lastResync = 0;
 
 // Configuration variables:
-String config_wifiSSID = "";
-String config_wifiPass = "";
-String config_city = "";
-//int timezoneOffset = 0;  // in seconds
+String   config_wifiSSID          = "";
+String   config_wifiPass          = "";
+String   config_city              = "";
 bool     config_showSeconds       = false;
 bool     config_imperial          = false;
 String   config_timezone          = "CET-1CEST,M3.5.0/2,M10.5.0/3";
 bool     config_timezone_manual   = false;
 bool     config_variableContrast  = false;
+bool     config_contrastFollowSun = false;
 uint8_t  config_dayContrast       = 255;
-uint8_t  config_nightContrast     = 10;
+uint8_t  config_nightContrast     = 1;
 uint16_t config_dawnDuskDuration  = 30;  //minutes
 uint32_t config_sunRise           = 25200;  //in seconds 7h in the morning
 uint32_t config_sunSet            = 75600;   //in seconds 21h at night
 
 // Weather data variables:
-String weatherTemp = "N/A";
-String weatherCond = "";
-String weatherHum = "";
-String weatherWind = "";
-String weatherPress = "";
-bool weatherValid = false;
-time_t weatherLastSuccessfulUpdate = 0;
+String weather_temp    = "N/A";
+String weather_cond    = "";
+String weather_hum     = "";
+String weather_wind    = "";
+String weather_press   = "";
+bool   weather_valid   = false;
+time_t weather_lastSuccessfulUpdate = 0;
+String weather_sundawn = "07:00";
+String weather_sunrise = "07:30";
+String weather_sunset  = "19:00";
+String weather_sundusk = "19:30";
 
 static const uint32_t REBOOT_AFTER_MS = 49UL * 24UL * 60UL * 60UL * 1000UL;
 bool rebootIn10mins = false;
@@ -118,6 +122,8 @@ void setupTimeWithDST();
 void timeSyncCallback(struct timeval *tv);
 void serialPrintTime();
 void debugTZ();
+void setDisplayBrightness(uint8_t contrast);
+uint8_t calculateDisplayBrightness();
 
 void setup() 
 {
@@ -240,13 +246,13 @@ void setup()
 
     // Prepare first weather fetch
     lastWeatherFetch = 0; // force immediate fetch on first weather screen display
-    weatherValid = false;
+    weather_valid = false;
     Serial.println(F("Setup complete, entering loop."));
   }
   Serial.println(F("Getting initial weather..."));
-  weatherValid = getWeather();
+  weather_valid = getWeather();
   lastWeatherFetch = millis();
-  if (weatherValid) 
+  if (weather_valid) 
   {
     Serial.println(F("Initial weather fetch successful."));
   } 
@@ -258,7 +264,7 @@ void setup()
 
 void loop() 
 {
-  time_t now = millis();
+  uint32_t now = millis();
 
   //Reboot after 49 days of continues use, to avoid millis() rollover problems :-D
   if (now > REBOOT_AFTER_MS) 
@@ -282,6 +288,19 @@ void loop()
     }
     server.handleClient();
     // In AP mode, do not run normal display loop
+
+    /*//Debug:
+    uint32_t timeBridgness = (now / 10) % 255;
+    display.clearDisplay();
+    display.setTextColor(SSD1306_WHITE);
+    setDisplayBrightness(timeBridgness);
+    display.setCursor(0, 0);
+    display.setTextSize(1);
+    display.println("HOLA");
+    display.println(timeBridgness);
+    display.println("======");
+    display.display();
+    Serial.println(timeBridgness);*/
     return;
   }
 
@@ -300,9 +319,9 @@ void loop()
       if (millis() - lastWeatherFetch > 900000UL /*|| !weatherValid*/) 
       {
         Serial.println(F("Updating weather data..."));
-        weatherValid = getWeather();
+        weather_valid = getWeather();
         lastWeatherFetch = millis();
-        if (weatherValid) 
+        if (weather_valid) 
         {
           Serial.println(F("Weather update successful."));
         } 
@@ -315,7 +334,7 @@ void loop()
   }
 
   // Draw the appropriate screen
-  if (showWeatherScreen && weatherValid) 
+  if (showWeatherScreen && weather_valid) 
   {
     drawWeatherScreen();
   } 
@@ -425,6 +444,19 @@ static String htmlEscape(const String& s)
   return out;
 }
 
+static String formatHHMM(uint32_t secondsOfDay)
+{
+  // Clamp to 0..86399 just in case
+  if (secondsOfDay > 86399UL) secondsOfDay = 0;
+
+  uint32_t h = secondsOfDay / 3600UL;
+  uint32_t m = (secondsOfDay % 3600UL) / 60UL;
+
+  char buf[6];
+  snprintf(buf, sizeof(buf), "%02lu:%02lu", (unsigned long)h, (unsigned long)m);
+  return String(buf);
+}
+
 void startConfigPortal(String errorMessage)
 {
   // Stop any existing WiFi and start AP
@@ -476,18 +508,21 @@ void startConfigPortal(String errorMessage)
     page += "form{margin:0;}";
     page += ".row{display:grid;grid-template-columns:160px 1fr;gap:10px;align-items:center;margin:10px 0;}";
     page += "label{color:#333;font-size:14px;}";
-    page += "input[type=text],input[type=password],select{width:100%;padding:10px;border:1px solid #ccc;border-radius:8px;box-sizing:border-box;font-size:14px;}";
+    page += "input[type=text],input[type=password],input[type=number],select{width:100%;padding:10px;border:1px solid #ccc;border-radius:8px;box-sizing:border-box;font-size:14px;}";
     page += ".checkwrap{display:flex;align-items:center;gap:10px;}";
     page += "input[type=checkbox]{transform:scale(1.15);}";
     page += ".radiowrap{display:flex;gap:18px;align-items:center;flex-wrap:wrap;}";
     page += ".radioopt{display:flex;align-items:center;gap:8px;}";
     page += ".btn{margin-top:16px;width:100%;padding:12px;border:0;border-radius:8px;background:#4caf50;color:#fff;font-size:16px;cursor:pointer;}";
     page += ".btn:hover{background:#45a049;}";
+    page += ".section{margin-top:16px;padding-top:10px;border-top:1px solid #eee;}";
+    page += ".hint{font-size:12px;color:#666;line-height:1.3;}";
     page += "@media(max-width:520px){.row{grid-template-columns:1fr;}}";
     page += "</style>";
 
     page += "</head><body><div class='container'>";
-    page += "<h2>Device Configuration</h2><form method='POST' action='/'>";
+    page += "<h2>Device Configuration</h2>";
+    page += "<form id='cfgform' method='POST' action='/'>";
 
     // WiFi SSID field
     page += "<div class='row'><label for='ssid'>Wi-Fi SSID:</label>";
@@ -505,7 +540,6 @@ void startConfigPortal(String errorMessage)
     page += "<div class='row'><label for='tz'>Timezone:</label>";
     page += "<select name='tz' id='tz' onchange='toggleTZManual()'>";
 
-    // Basic presets (keep it simple)
     page += "<option value='UTC0'";
     if (config_timezone == "UTC0" && !config_timezone_manual) page += " selected";
     page += ">UTC</option>";
@@ -526,27 +560,25 @@ void startConfigPortal(String errorMessage)
     if (config_timezone == "PST8PDT,M3.2.0/2,M11.1.0/2" && !config_timezone_manual) page += " selected";
     page += ">US Pacific (PST/PDT)</option>";
 
-    // Manual option
     page += "<option value='MANUAL'";
     if (config_timezone_manual) page += " selected";
     page += ">Manual (advanced)</option>";
 
     page += "</select></div>";
 
-    // Manual TZ row (grid row so it aligns with everything else)
+    // Manual TZ row
     page += "<div class='row' id='tz_manual_row' style='";
     if (!config_timezone_manual) page += "display:none;";
     page += "'>";
     page += "<label for='tz_manual'>Manual TZ string:</label>";
     page += "<input id='tz_manual' type='text' name='tz_manual' ";
     page += "placeholder='e.g. CET-1CEST,M3.5.0/2,M10.5.0/3' ";
-    // If manual is enabled, show the stored TZ string; otherwise keep it empty
     page += "value='";
     if (config_timezone_manual) page += htmlEscape(config_timezone);
     page += "'>";
     page += "</div>";
 
-    // Show seconds checkbox (aligned)
+    // Show seconds checkbox
     page += "<div class='row'><label>Show seconds:</label>";
     page += "<div class='checkwrap'>";
     page += "<input type='checkbox' name='showseconds' value='1'";
@@ -555,7 +587,7 @@ void startConfigPortal(String errorMessage)
     page += "<span></span>";
     page += "</div></div>";
 
-    // Units radio (aligned)
+    // Units radio
     page += "<div class='row'><label>Units:</label>";
     page += "<div class='radiowrap'>";
 
@@ -569,13 +601,130 @@ void startConfigPortal(String errorMessage)
 
     page += "</div></div>";
 
-    // JS (toggle + initial state)
+    // -------------------------
+    // Contrast configuration UI
+    // -------------------------
+    page += "<div class='section'></div>";
+
+    // Variable contrast master toggle
+    page += "<div class='row'><label>Variable contrast:</label>";
+    page += "<div class='checkwrap'>";
+    page += "<input id='variableContrast' type='checkbox' name='variableContrast' value='1'";
+    if (config_variableContrast) page += " checked";
+    page += ">";
+    page += "<span></span>";
+    page += "</div></div>";
+
+    // Wrapper shown only if variable contrast enabled
+    page += "<div id='contrast_block' style='";
+    if (!config_variableContrast) page += "display:none;";
+    page += "'>";
+
+    // Follow sun toggle
+    page += "<div class='row' id='followSun_row'><label>Contrast follows sun:</label>";
+    page += "<div class='checkwrap'>";
+    page += "<input id='contrastFollowSun' type='checkbox' name='contrastFollowSun' value='1'";
+    if (config_contrastFollowSun) page += " checked";
+    page += ">";
+    page += "<span></span>";
+    page += "</div></div>";
+
+    // Day / Night contrast
+    page += "<div class='row' id='dayContrast_row'><label for='dayContrast'>Day contrast (0-255):</label>";
+    page += "<input id='dayContrast' type='number' min='1' max='255' name='dayContrast' value='" + String(config_dayContrast) + "'></div>";
+
+    page += "<div class='row' id='nightContrast_row'><label for='nightContrast'>Night contrast (0-255):</label>";
+    page += "<input id='nightContrast' type='number' min='0' max='255' name='nightContrast' value='" + String(config_nightContrast) + "'></div>";
+
+    page += "<div class='hint' style='margin:-4px 0 10px 0;'>When <b>follows sun</b> is enabled, the clock auto-computes transitions. Otherwise you can set times manually.</div>";
+
+    // Sunrise / Sunset / DawnDusk (hidden when followSun ON)
+    page += "<div id='sunTimes_block' style='";
+    if (config_contrastFollowSun) page += "display:none;";
+    page += "'>";
+
+    // Human sunrise/sunset (HH:MM) + hidden numeric fields (seconds) actually submitted
+    page += "<div class='row'><label for='sunRise_hm'>Sunrise (HH:MM):</label>";
+    page += "<input id='sunRise_hm' type='text' inputmode='numeric' placeholder='07:00' value='" + formatHHMM(config_sunRise) + "'></div>";
+
+    page += "<div class='row'><label for='sunSet_hm'>Sunset (HH:MM):</label>";
+    page += "<input id='sunSet_hm' type='text' inputmode='numeric' placeholder='21:00' value='" + formatHHMM(config_sunSet) + "'></div>";
+
+    page += "<div class='row'><label for='dawnDusk'>Dawn/Dusk duration (min):</label>";
+    page += "<input id='dawnDusk' type='number' min='0' max='240' name='dawnDusk' value='" + String(config_dawnDuskDuration) + "'></div>";
+
+    // Hidden fields (backend keeps receiving seconds)
+    page += "<input type='hidden' name='sunRise' id='sunRise' value='" + String(config_sunRise) + "'>";
+    page += "<input type='hidden' name='sunSet' id='sunSet' value='" + String(config_sunSet) + "'>";
+
+    page += "</div>"; // sunTimes_block
+    page += "</div>"; // contrast_block
+
+    // -------------------------
+    // JS (TZ + Contrast UI + HH:MM conversion)
+    // -------------------------
     page += "<script>";
+
+    // TZ manual toggle
     page += "function toggleTZManual(){";
     page += "var tz=document.getElementById('tz').value;";
-    page += "document.getElementById('tz_manual_row').style.display = (tz==='MANUAL')?'grid':'none';";
+    page += "document.getElementById('tz_manual_row').style.display=(tz==='MANUAL')?'grid':'none';";
     page += "}";
+
+    // Contrast UI toggle
+    page += "function toggleContrastUI(){";
+    page += "var vc=document.getElementById('variableContrast');";
+    page += "var fs=document.getElementById('contrastFollowSun');";
+    page += "var vcOn = vc && vc.checked;";
+    page += "var fsOn = fs && fs.checked;";
+    page += "document.getElementById('contrast_block').style.display = vcOn ? '' : 'none';";
+    page += "document.getElementById('sunTimes_block').style.display = (vcOn && !fsOn) ? '' : 'none';";
+    page += "}";
+
+    // HH:MM -> seconds (0 if invalid)
+    page += "function hmToSeconds(hm){";
+    page += "if(!hm) return 0;";
+    page += "hm = hm.trim();";
+    page += "var p = hm.split(':');";
+    page += "if(p.length!==2) return 0;";
+    page += "var h=parseInt(p[0],10), m=parseInt(p[1],10);";
+    page += "if(isNaN(h)||isNaN(m)) return 0;";
+    page += "if(h<0||h>23||m<0||m>59) return 0;";
+    page += "return h*3600 + m*60;";
+    page += "}";
+
+    // Wire events + initial state
+    page += "document.addEventListener('DOMContentLoaded', function(){";
     page += "toggleTZManual();";
+    page += "toggleContrastUI();";
+
+    page += "var tzSel=document.getElementById('tz');";
+    page += "if(tzSel) tzSel.addEventListener('change', toggleTZManual);";
+
+    page += "var vc=document.getElementById('variableContrast');";
+    page += "var fs=document.getElementById('contrastFollowSun');";
+    page += "if(vc) vc.addEventListener('change', toggleContrastUI);";
+    page += "if(fs) fs.addEventListener('change', toggleContrastUI);";
+
+    // Before submit: convert HH:MM to seconds into hidden fields
+    page += "var form=document.getElementById('cfgform');";
+    page += "if(form){";
+    page += "form.addEventListener('submit', function(){";
+    page += "var sr=document.getElementById('sunRise_hm');";
+    page += "var ss=document.getElementById('sunSet_hm');";
+    page += "var srSec = hmToSeconds(sr?sr.value:'');";
+    page += "var ssSec = hmToSeconds(ss?ss.value:'');";
+    page += "document.getElementById('sunRise').value = srSec;";
+    page += "document.getElementById('sunSet').value  = ssSec;";
+    page += "});";
+    page += "}";
+
+    page += "});";
+
+    // Also run once right now (safety)
+    page += "toggleTZManual();";
+    page += "toggleContrastUI();";
+
     page += "</script>";
 
     // Submit button
@@ -590,7 +739,7 @@ void startConfigPortal(String errorMessage)
   Serial.println(F("HTTP server started for config portal."));
 }
 
-void handleConfigForm() 
+void handleConfigForm()
 {
   // Get form values
   String ssid     = server.arg("ssid");
@@ -599,9 +748,23 @@ void handleConfigForm()
   String tzSelect = server.arg("tz");          // preset or "MANUAL"
   String tzManual = server.arg("tz_manual");   // only meaningful if MANUAL
 
-  // New fields
-  bool showSeconds = server.hasArg("showseconds");  // checkbox: present => true
-  String units     = server.arg("units");           // "metric" or "imperial"
+  // Existing fields
+  bool   showSeconds = server.hasArg("showseconds"); // checkbox: present => true
+  String units       = server.arg("units");          // "metric" or "imperial"
+
+  // New contrast fields (from the updated UI)
+  bool variableContrast   = server.hasArg("variableContrast");
+  bool contrastFollowSun  = server.hasArg("contrastFollowSun");
+
+  // Day/Night contrast are meaningful only if variableContrast is on
+  String dayContrastStr   = server.arg("dayContrast");     // 0..255
+  String nightContrastStr = server.arg("nightContrast");   // 0..255
+
+  // Manual sun times (only meaningful if variableContrast is on AND followSun is off)
+  // NOTE: the UI sends these as seconds via hidden fields sunRise/sunSet
+  String sunRiseStr       = server.arg("sunRise");         // seconds of day
+  String sunSetStr        = server.arg("sunSet");          // seconds of day
+  String dawnDuskStr      = server.arg("dawnDusk");        // minutes
 
   Serial.println(F("Received configuration:"));
   Serial.print(F("SSID: ")); Serial.println(ssid);
@@ -612,8 +775,16 @@ void handleConfigForm()
   Serial.print(F("Show seconds: ")); Serial.println(showSeconds ? "true" : "false");
   Serial.print(F("Units: ")); Serial.println(units);
 
+  Serial.print(F("Variable contrast: ")); Serial.println(variableContrast ? "true" : "false");
+  Serial.print(F("Contrast follows sun: ")); Serial.println(contrastFollowSun ? "true" : "false");
+  Serial.print(F("Day contrast: ")); Serial.println(dayContrastStr);
+  Serial.print(F("Night contrast: ")); Serial.println(nightContrastStr);
+  Serial.print(F("Sunrise (s): ")); Serial.println(sunRiseStr);
+  Serial.print(F("Sunset (s): ")); Serial.println(sunSetStr);
+  Serial.print(F("Dawn/Dusk (min): ")); Serial.println(dawnDuskStr);
+
   // Basic validation
-  if (ssid.length() == 0 || newCity.length() == 0 || tzSelect.length() == 0) 
+  if (ssid.length() == 0 || newCity.length() == 0 || tzSelect.length() == 0)
   {
     server.send(400, "text/html",
       "<html><body><h3>Invalid input, please fill all required fields.</h3></body></html>");
@@ -621,18 +792,15 @@ void handleConfigForm()
   }
 
   // Units validation (default to metric if missing)
-  bool imperial = false;
-  if (units == "imperial") imperial = true;
-  else imperial = false; // includes "metric" or empty
+  bool imperial = (units == "imperial");
 
   // Timezone handling
   String finalTZ;
   bool tzIsManual = false;
 
-  if (tzSelect == "MANUAL") 
+  if (tzSelect == "MANUAL")
   {
-    // Require manual string if manual mode
-    if (tzManual.length() == 0) 
+    if (tzManual.length() == 0)
     {
       server.send(400, "text/html",
         "<html><body><h3>Manual timezone selected but TZ string is empty.</h3></body></html>");
@@ -640,23 +808,98 @@ void handleConfigForm()
     }
     finalTZ = tzManual;
     tzIsManual = true;
-  } 
-  else 
+  }
+  else
   {
     finalTZ = tzSelect;   // preset string
     tzIsManual = false;
   }
 
+  // ---- Parse + validate contrast settings ----
+  // Defaults fall back to current config values (so missing fields won't nuke them)
+  uint8_t  dayC   = config_dayContrast;
+  uint8_t  nightC = config_nightContrast;
+  uint16_t dawnMin = config_dawnDuskDuration;
+  uint32_t sunRiseSec = config_sunRise;
+  uint32_t sunSetSec  = config_sunSet;
+
+  if (variableContrast)
+  {
+    // Day/Night contrast (required-ish when variableContrast is enabled)
+    // If empty, keep previous to be forgiving.
+    if (dayContrastStr.length() > 0)
+    {
+      long v = dayContrastStr.toInt();
+      if (v < 0) v = 0;
+      if (v > 255) v = 255;
+      dayC = (uint8_t)v;
+    }
+
+    if (nightContrastStr.length() > 0)
+    {
+      long v = nightContrastStr.toInt();
+      if (v < 0) v = 0;
+      if (v > 255) v = 255;
+      nightC = (uint8_t)v;
+    }
+
+    // Manual sun times only used if followSun is OFF
+    if (!contrastFollowSun)
+    {
+      // Dawn/Dusk duration in minutes
+      if (dawnDuskStr.length() > 0)
+      {
+        long v = dawnDuskStr.toInt();
+        if (v < 0) v = 0;
+        if (v > 240) v = 240; // sane cap
+        dawnMin = (uint16_t)v;
+      }
+
+      // Sunrise/Sunset seconds-of-day (0..86399)
+      if (sunRiseStr.length() > 0)
+      {
+        long v = sunRiseStr.toInt();
+        if (v < 0) v = 0;
+        if (v > 86399) v = 86399;
+        sunRiseSec = (uint32_t)v;
+      }
+
+      if (sunSetStr.length() > 0)
+      {
+        long v = sunSetStr.toInt();
+        if (v < 0) v = 0;
+        if (v > 86399) v = 86399;
+        sunSetSec = (uint32_t)v;
+      }
+    }
+    // If followSun is ON, we intentionally ignore manual sunrise/sunset/duration
+  }
+  else
+  {
+    // If variableContrast is OFF, we ignore all contrast-related inputs.
+    // (We keep stored values untouched; the device just won't use them.)
+    contrastFollowSun = false; // optional: force consistent state
+  }
+
   // Save into config variables
   config_wifiSSID = ssid;
   config_wifiPass = pass;
-  config_city = newCity;
+  config_city     = newCity;
 
-  config_timezone = finalTZ;
+  config_timezone        = finalTZ;
   config_timezone_manual = tzIsManual;
 
   config_showSeconds = showSeconds;
-  config_imperial = imperial;
+  config_imperial    = imperial;
+
+  // New config vars
+  config_variableContrast  = variableContrast;
+  config_contrastFollowSun = contrastFollowSun;
+  config_dayContrast       = dayC;
+  config_nightContrast     = nightC;
+  config_dawnDuskDuration  = dawnMin;
+  config_sunRise           = sunRiseSec;
+  config_sunSet            = sunSetSec;
 
   // Persist to EEPROM/NVS
   saveSettings();
@@ -666,6 +909,25 @@ void handleConfigForm()
     "<html><body><h3>Settings saved. Rebooting...</h3></body></html>");
   delay(800);
   ESP.restart();
+}
+
+
+static uint16_t eepromReadU16(int addr)
+{
+  uint16_t v = 0;
+  v |= (uint16_t)EEPROM.read(addr + 0);
+  v |= (uint16_t)EEPROM.read(addr + 1) << 8;
+  return v;
+}
+
+static uint32_t eepromReadU32(int addr)
+{
+  uint32_t v = 0;
+  v |= (uint32_t)EEPROM.read(addr + 0);
+  v |= (uint32_t)EEPROM.read(addr + 1) << 8;
+  v |= (uint32_t)EEPROM.read(addr + 2) << 16;
+  v |= (uint32_t)EEPROM.read(addr + 3) << 24;
+  return v;
 }
 
 static String eepromReadString(int baseAddr, int maxLen) 
@@ -693,18 +955,26 @@ void loadSettings()
 
   bool sigOk = (s0 == 'C' && s1 == 'F' && s2 == 'G' && s3 == DEVICE_SIGNATURE);
 
-  if (!sigOk) 
+  if (!sigOk)
   {
     // Defaults if EEPROM not initialized for this version
     config_wifiSSID = "";
     config_wifiPass = "";
-    config_city = "";
+    config_city     = "";
 
-    config_timezone = "UTC0";
+    config_timezone        = "UTC0";
     config_timezone_manual = false;
 
     config_showSeconds = false;
-    config_imperial = false;
+    config_imperial    = false;
+
+    // NEW defaults (match your globals, but explicit here)
+    config_variableContrast = false;
+    config_dayContrast      = 255;
+    config_nightContrast    = 10;
+    config_dawnDuskDuration = 30;
+    config_sunRise          = 25200; // 07:00
+    config_sunSet           = 75600; // 21:00
 
     Serial.println(F("EEPROM signature invalid or mismatched. Using defaults."));
     return;
@@ -723,17 +993,39 @@ void loadSettings()
   config_timezone = eepromReadString(ADDR_TZ,   MAX_TZ);
 
   // --- Read packed booleans ---
-  uint8_t flags = EEPROM.read(ADDR_BOOLEANS);
-  config_timezone_manual = (flags & (1 << 0)) != 0;
-  config_showSeconds     = (flags & (1 << 1)) != 0;
-  config_imperial        = (flags & (1 << 2)) != 0;
+  uint8_t flags = EEPROM.read(ADDR_VARIABLES);
+  config_timezone_manual   = (flags & (1 << 0)) != 0;
+  config_showSeconds       = (flags & (1 << 1)) != 0;
+  config_imperial          = (flags & (1 << 2)) != 0;
+  config_variableContrast  = (flags & (1 << 3)) != 0;
+  config_contrastFollowSun = (flags & (1 << 4)) != 0;
 
-  // Safety fallback if timezone string somehow empty
-  if (config_timezone.length() == 0) 
+  // --- Read extra variables (layout must match saveSettings) ---
+  const int A_DAY_CONTRAST   = ADDR_VARIABLES + 1;
+  const int A_NIGHT_CONTRAST = ADDR_VARIABLES + 2;
+  const int A_DAWN_DUSK_U16  = ADDR_VARIABLES + 3; // +3..+4
+  const int A_SUNRISE_U32    = ADDR_VARIABLES + 5; // +5..+8
+  const int A_SUNSET_U32     = ADDR_VARIABLES + 9; // +9..+12
+
+  config_dayContrast      = EEPROM.read(A_DAY_CONTRAST);
+  config_nightContrast    = EEPROM.read(A_NIGHT_CONTRAST);
+  config_dawnDuskDuration = eepromReadU16(A_DAWN_DUSK_U16);
+  config_sunRise          = eepromReadU32(A_SUNRISE_U32);
+  config_sunSet           = eepromReadU32(A_SUNSET_U32);
+
+  // --- Sanity checks / fallbacks ---
+  if (config_timezone.length() == 0)
   {
     config_timezone = "UTC0";
     config_timezone_manual = false;
   }
+
+  // Clamp sunrise/sunset to valid seconds-of-day (0..86399)
+  if (config_sunRise > 86399UL) config_sunRise = 25200UL;
+  if (config_sunSet  > 86399UL) config_sunSet  = 75600UL;
+
+  // Dawn/dusk duration: avoid crazy values (0..240 minutes as a reasonable cap)
+  if (config_dawnDuskDuration > 240) config_dawnDuskDuration = 30;
 
   Serial.println(F("Configuration loaded from EEPROM."));
   Serial.print(F("SSID: ")); Serial.println(config_wifiSSID);
@@ -743,6 +1035,15 @@ void loadSettings()
   Serial.print(F("Timezone manual: ")); Serial.println(config_timezone_manual ? "true" : "false");
   Serial.print(F("Show seconds: ")); Serial.println(config_showSeconds ? "true" : "false");
   Serial.print(F("Units imperial: ")); Serial.println(config_imperial ? "true" : "false");
+
+  // NEW debug prints
+  Serial.print(F("Variable contrast: ")); Serial.println(config_variableContrast ? "true" : "false");
+  Serial.print(F("Contrast to follow Sun: ")); Serial.println(config_contrastFollowSun ? "true" : "false");
+  Serial.print(F("Day contrast: ")); Serial.println(config_dayContrast);
+  Serial.print(F("Night contrast: ")); Serial.println(config_nightContrast);
+  Serial.print(F("Dawn/Dusk duration (min): ")); Serial.println(config_dawnDuskDuration);
+  Serial.print(F("Sunrise (s): ")); Serial.println(config_sunRise);
+  Serial.print(F("Sunset (s): ")); Serial.println(config_sunSet);
 }
 
 // Helper: write a length-prefixed string into EEPROM and clear leftover bytes
@@ -763,34 +1064,66 @@ static void eepromWriteString(int baseAddr, const String& s, int maxLen)
   }
 }
 
+// Helpers to write integers in little-endian
+static void eepromWriteU16(int addr, uint16_t v)
+{
+  EEPROM.write(addr + 0, (uint8_t)(v & 0xFF));
+  EEPROM.write(addr + 1, (uint8_t)((v >> 8) & 0xFF));
+}
+
+static void eepromWriteU32(int addr, uint32_t v)
+{
+  EEPROM.write(addr + 0, (uint8_t)(v & 0xFF));
+  EEPROM.write(addr + 1, (uint8_t)((v >> 8) & 0xFF));
+  EEPROM.write(addr + 2, (uint8_t)((v >> 16) & 0xFF));
+  EEPROM.write(addr + 3, (uint8_t)((v >> 24) & 0xFF));
+}
+
 void saveSettings() 
 {
-  // Define max lengths so we don't run outside EEPROM sections.
-  // With your spacing (0,70,140,210,300,500) you have 69 bytes payload for each string region if you want.
-  // We use max 60 to leave margin.
   const int MAX_SSID = 60;
   const int MAX_PASS = 60;
   const int MAX_CITY = 60;
-  const int MAX_TZ   = 80; // TZ strings can be longer; you have room from 210 to 299 (~89 bytes)
+  const int MAX_TZ   = 80; // 210..299 gives you ~90 bytes total (len + payload)
 
   // Write SSID / PASS / CITY / TZ
   eepromWriteString(ADDR_SSID, config_wifiSSID, MAX_SSID);
   eepromWriteString(ADDR_PASS, config_wifiPass, MAX_PASS);
   eepromWriteString(ADDR_CITY, config_city,     MAX_CITY);
-  eepromWriteString(ADDR_TZ,   config_timezone, MAX_TZ);   // NEW: store TZ string
+  eepromWriteString(ADDR_TZ,   config_timezone, MAX_TZ);
 
-  // Pack booleans into one byte
+  // Pack booleans into one byte (flags)
   uint8_t flags = 0;
-  if (config_timezone_manual) flags |= (1 << 0);
-  if (config_showSeconds)     flags |= (1 << 1);
-  if (config_imperial)        flags |= (1 << 2);
+  if (config_timezone_manual) flags  |= (1 << 0);
+  if (config_showSeconds)     flags  |= (1 << 1);
+  if (config_imperial)        flags  |= (1 << 2);
+  if (config_variableContrast)flags  |= (1 << 3); 
+  if (config_contrastFollowSun)flags |= (1 << 4);
+  
 
-  EEPROM.write(ADDR_BOOLEANS, flags);
+  EEPROM.write(ADDR_VARIABLES, flags);
 
-  // Optional: clear next few bytes for future expansion (safe)
-  EEPROM.write(ADDR_BOOLEANS + 1, 0);
-  EEPROM.write(ADDR_BOOLEANS + 2, 0);
-  EEPROM.write(ADDR_BOOLEANS + 3, 0);
+  // Layout from ADDR_VARIABLES + 1:
+  // +1  : dayContrast (u8)
+  // +2  : nightContrast (u8)
+  // +3  : dawnDuskDuration (u16)   -> uses +3..+4
+  // +5  : sunRise (u32)            -> uses +5..+8
+  // +9  : sunSet (u32)             -> uses +9..+12
+  const int A_DAY_CONTRAST   = ADDR_VARIABLES + 1;
+  const int A_NIGHT_CONTRAST = ADDR_VARIABLES + 2;
+  const int A_DAWN_DUSK_U16  = ADDR_VARIABLES + 3;
+  const int A_SUNRISE_U32    = ADDR_VARIABLES + 5;
+  const int A_SUNSET_U32     = ADDR_VARIABLES + 9;
+
+  EEPROM.write(A_DAY_CONTRAST,   config_dayContrast);
+  EEPROM.write(A_NIGHT_CONTRAST, config_nightContrast);
+  eepromWriteU16(A_DAWN_DUSK_U16, config_dawnDuskDuration);
+  eepromWriteU32(A_SUNRISE_U32,   config_sunRise);
+  eepromWriteU32(A_SUNSET_U32,    config_sunSet);
+
+  // Optional: clear a little padding for future expansion
+  //for (int i = ADDR_VARIABLES + 13; i < ADDR_VARIABLES + 20; i++)
+  //  EEPROM.write(i, 0);
 
   // Write signature 'CFGx'
   EEPROM.write(ADDR_SIGNATURE,     'C');
@@ -825,6 +1158,185 @@ static String sanitizeWindForDisplay(const String& w)
   return out;
 }
 
+static uint32_t hhmmToSeconds(const String& hhmm)
+{
+  int colon = hhmm.indexOf(':');
+  int h = hhmm.substring(0, colon).toInt();
+  int m = hhmm.substring(colon + 1).toInt();
+
+  // Assume caller already validated; just clamp lightly
+  if (h < 0) h = 0; if (h > 23) h = 23;
+  if (m < 0) m = 0; if (m > 59) m = 59;
+
+  return (uint32_t)h * 3600UL + (uint32_t)m * 60UL;
+}
+
+static uint8_t lerpU8(uint8_t a, uint8_t b, float t)
+{
+  if (t <= 0.0f) return a;
+  if (t >= 1.0f) return b;
+  float v = (float)a + ((float)b - (float)a) * t;
+  if (v < 0.0f) v = 0.0f;
+  if (v > 255.0f) v = 255.0f;
+  return (uint8_t)(v + 0.5f);
+}
+
+uint8_t lastBrightness_ = 0;
+
+uint8_t calculateDisplayBrightness()
+{
+  uint8_t brightness = calculateDisplayBrightness_d(false);
+  if(brightness != lastBrightness_)
+  {
+    lastBrightness_ = brightness;
+    //calculateDisplayBrightness_d(true);
+    Serial.print("Calculated Brightness: ");
+    Serial.println(brightness);
+  }
+  
+  return brightness;
+}
+
+uint8_t calculateDisplayBrightness_d(bool debug)
+{
+   if (config_variableContrast == false)
+    return 255;
+
+  time_t localSunsetSec  = 0;
+  time_t localSunriseSec = 0;
+  time_t localSundawnSec = 0;
+  time_t localSunduskSec = 0;
+
+  if (!config_contrastFollowSun)
+  {
+    // Manually set times (seconds-of-day)
+    localSunsetSec  = (time_t)config_sunSet;
+    localSunriseSec = (time_t)config_sunRise;
+    localSundawnSec = (time_t)config_sunRise - (time_t)config_dawnDuskDuration * 60;
+    localSunduskSec = (time_t)config_sunSet  + (time_t)config_dawnDuskDuration * 60;
+  }
+  else
+  {
+    // Follow sun times from weather (seconds-of-day)
+    localSunsetSec  = (time_t)hhmmToSeconds(weather_sunset);
+    localSunriseSec = (time_t)hhmmToSeconds(weather_sunrise);
+    localSundawnSec = (time_t)hhmmToSeconds(weather_sundawn);
+    localSunduskSec = (time_t)hhmmToSeconds(weather_sundusk);
+  }
+
+  struct tm timeinfo;
+  getLocalTime(&timeinfo);
+
+  timeinfo.tm_isdst = -1;
+  time_t nowEpoch = mktime(&timeinfo);
+
+  const time_t SEC_PER_DAY = 3600 * 24;
+  // Start of "today" in local epoch
+  struct tm dayStart = timeinfo;
+  dayStart.tm_hour = 0;
+  dayStart.tm_min  = 0;
+  dayStart.tm_sec  = 0;
+  dayStart.tm_isdst = -1;
+  time_t todayStartsSec = mktime(&dayStart);
+
+  // Convert seconds-of-day to today's epochs
+  localSunsetSec  += todayStartsSec;
+  localSunriseSec += todayStartsSec;
+  localSundawnSec += todayStartsSec;
+  localSunduskSec += todayStartsSec;
+
+  if(debug)
+  {
+    Serial.print("Now: ");
+    Serial.print(nowEpoch);
+  
+    Serial.print(" - localSundawnSec: ");
+    Serial.print(localSundawnSec);
+
+    Serial.print(" - localSunriseSec: ");
+    Serial.print(localSunriseSec);
+
+    Serial.print(" - localSunsetSec: ");
+    Serial.print(localSunsetSec);    
+    
+    Serial.print(" - localSunduskSec: ");
+    Serial.println(localSunduskSec);
+  }
+
+  //If night or day, return config_nightContrast or config_dayContrast
+  //However if we are between dawn and sunrise or sunset and dusk, we need
+  //to calculate linearly the contrast between both variables.
+  // --- Handle wrap-around across midnight for dawn/dusk (manual mode can do this) ---
+  // If sundawn was computed as sunrise - duration and went negative, it will be < todayStartsSec
+  // => it actually belongs to yesterday.
+  if (localSundawnSec < todayStartsSec) localSundawnSec += SEC_PER_DAY;
+
+  // If sundusk goes beyond end of today, it belongs to tomorrow.
+  if (localSunduskSec >= todayStartsSec + SEC_PER_DAY) localSunduskSec -= SEC_PER_DAY;
+
+  // Instead of trying to "sort" the events, we treat the day as 4 segments:
+  // Night:  [dusk .. dawn)
+  // Dawn ramp: [dawn .. sunrise)
+  // Day:   [sunrise .. sunset)
+  // Dusk ramp: [sunset .. dusk)
+
+  // But if dawn ended up "tomorrow" (e.g. 23:50 dawn), it means our night interval spans midnight.
+  // So we do comparisons in a way that works even when dusk < dawn (wrap-around).
+
+  auto inRange = [&](time_t x, time_t a, time_t b) -> bool {
+    // returns true if x in [a,b) with wrap-around allowed
+    if (a <= b) return (x >= a && x < b);
+    // wraps midnight
+    return (x >= a || x < b);
+  };
+
+  // Ensure sunrise/sunset are in today's range (they should be)
+  // If your inputs can make sunrise/sunset wrap, you can normalize similarly.
+
+  // 1) Dawn ramp
+  if (inRange(nowEpoch, localSundawnSec, localSunriseSec))
+  {
+    float span = (float)(localSunriseSec - localSundawnSec);
+    // If wrapped, add a day to span
+    if (span <= 0.0f) span += (float)SEC_PER_DAY;
+
+    float dt = (float)(nowEpoch - localSundawnSec);
+    if (dt < 0.0f) dt += (float)SEC_PER_DAY;
+
+    float t = dt / span;
+    return lerpU8(config_nightContrast, config_dayContrast, t);
+  }
+
+  // 2) Day plateau
+  if (inRange(nowEpoch, localSunriseSec, localSunsetSec))
+  {
+    return config_dayContrast;
+  }
+
+  // 3) Dusk ramp
+  if (inRange(nowEpoch, localSunsetSec, localSunduskSec))
+  {
+    float span = (float)(localSunduskSec - localSunsetSec);
+    if (span <= 0.0f) span += (float)SEC_PER_DAY;
+
+    float dt = (float)(nowEpoch - localSunsetSec);
+    if (dt < 0.0f) dt += (float)SEC_PER_DAY;
+
+    float t = dt / span;
+    return lerpU8(config_dayContrast, config_nightContrast, t);
+  }
+
+  // 4) Night plateau (everything else)
+  return config_nightContrast;
+}
+
+void setDisplayBrightness(uint8_t contrast)
+{
+  // contrast: 0 (very dim) .. 255 (very bright)
+  display.ssd1306_command(SSD1306_SETCONTRAST);
+  display.ssd1306_command(contrast);
+}
+
 static String sanitizeTempForDisplay(const String& t)
 {
   // Keep only: digits, leading +/-, and optionally one dot
@@ -854,6 +1366,8 @@ void drawTimeScreen()
   }
   display.clearDisplay();
   display.setTextColor(SSD1306_WHITE);
+  setDisplayBrightness(calculateDisplayBrightness());
+
   // Day name at top center
   // Get current epoch time and derive day of week
   //time_t epoch = timeClient.getEpochTime();
@@ -915,13 +1429,13 @@ void drawTimeScreen()
   // Bottom left: temperature and humidity
   display.setFont(NULL);
   display.setCursor(0, 56);
-  if (weatherValid && weatherTemp != "N/A" && weatherHum != "") 
+  if (weather_valid && weather_temp != "N/A" && weather_hum != "") 
   {
-    String tempDisplay = sanitizeTempForDisplay(weatherTemp);
+    String tempDisplay = sanitizeTempForDisplay(weather_temp);
     display.print(tempDisplay);
     display.print((char)247); // degree symbol (your display's charset)
-    display.print(config_imperial ? "F  " : "C  ");
-    display.print(weatherHum);
+    display.print(config_imperial ? "F " : "C ");
+    display.print(weather_hum);
   } 
   else 
   {
@@ -950,6 +1464,7 @@ void drawWeatherScreen()
   }
   display.clearDisplay();
   display.setTextColor(SSD1306_WHITE);
+  setDisplayBrightness(calculateDisplayBrightness());
   display.setFont(NULL);
   // Top center: city name
   String cityName = config_city;
@@ -960,10 +1475,10 @@ void drawWeatherScreen()
   display.print(cityName);
   // Middle center: temperature (big font FreeMonoBold12pt7b)
   display.setFont(&FreeMonoBold12pt7b);
-  if (weatherValid && weatherTemp != "N/A") 
+  if (weather_valid && weather_temp != "N/A") 
   {
     // weatherTemp is e.g. "+12" or "-3" as string (cleaned)
-    String tempNum = sanitizeTempForDisplay(weatherTemp);
+    String tempNum = sanitizeTempForDisplay(weather_temp);
     // Center the numeric part
     display.getTextBounds(tempNum, 0, 30, &x1, &y1, &w, &h);
     int tempX = (128 - (w + 12)) / 2; // leave space for degree and C (~12px)
@@ -994,7 +1509,7 @@ void drawWeatherScreen()
   }
   // Below temperature: condition string (centered)
   display.setFont(NULL);
-  String cond = weatherValid ? weatherCond : "";
+  String cond = weather_valid ? weather_cond : "";
   cond.trim();
   display.getTextBounds(cond, 0, 40, &x1, &y1, &w, &h);
   int condX = (128 - w) / 2;
@@ -1002,14 +1517,14 @@ void drawWeatherScreen()
   display.print(cond);
   // Bottom right: H:% W:m/s P:mm
   display.setFont(NULL);
-  if (weatherValid && weatherTemp != "N/A") 
+  if (weather_valid && weather_temp != "N/A") 
   {
-    String windDisplay = sanitizeWindForDisplay(weatherWind);
-    String bottomStr = String("H:") + weatherHum;
+    String windDisplay = sanitizeWindForDisplay(weather_wind);
+    String bottomStr = String("H:") + weather_hum;
     bottomStr += " " + windDisplay;
     bottomStr += (config_imperial ? "mph" : "km/h");
     //if (weatherWind != "N/A") bottomStr += "km/h";
-    bottomStr += " " + weatherPress;
+    bottomStr += " " + weather_press;
     display.getTextBounds(bottomStr, 0, 56, &x1, &y1, &w, &h);
     display.setCursor((128 - w)/2, 56);
     display.print(bottomStr);
@@ -1057,26 +1572,28 @@ bool getWeatherExpired()
   //as not valid
   time_t now = millis();
 
-  if(weatherLastSuccessfulUpdate == 0)
+  if(weather_lastSuccessfulUpdate == 0)
   {
     Serial.println("Fetching weather data failed and we never got a valid data :(. Expired!");
     return false; // We never got a valid weather :(
   }
 
-  if(weatherLastSuccessfulUpdate + 5400000UL > now)
+  if(weather_lastSuccessfulUpdate + 5400000UL > now)
   {
     Serial.println("Fetching weather data failed but previous stored data did not expired. So we keep the data :-D");
-    Serial.print(F("Temp=")); Serial.println(weatherTemp);
-    Serial.print(F("Cond=")); Serial.println(weatherCond);
-    Serial.print(F("Hum=")); Serial.println(weatherHum);
-    Serial.print(F("Wind=")); Serial.println(weatherWind);
-    Serial.print(F("Pressure=")); Serial.println(weatherPress);
+    Serial.print(F("Temp=")); Serial.println(weather_temp);
+    Serial.print(F("Cond=")); Serial.println(weather_cond);
+    Serial.print(F("Hum=")); Serial.println(weather_hum);
+    Serial.print(F("Wind=")); Serial.println(weather_wind);
+    Serial.print(F("Pressure=")); Serial.println(weather_press);
     return true;  // Last update was < 90 minutes ago, so it is still valid.
   }
 
   Serial.println("Weather data expired! :((((");
   return false;
 }
+
+uint32_t getWeatherCounter = 0;
 
 bool getWeather() 
 {
@@ -1092,7 +1609,16 @@ bool getWeather()
   String cityEnc = urlEncode(config_city);
   // Base query
   String query = "?format=%25t|%25C|%25h|%25w|%25P";
-  //query += "|%25D|%25S|%25s|%25d";
+  bool sunDataAvailable = false;
+
+  if(getWeatherCounter % 4 == 0 && config_variableContrast && config_contrastFollowSun)
+  {
+    //Also ask for Sun timings, but only once every 4 times (because in some latitudes the website crashes)
+    getWeatherCounter++;
+    query += "|%25D|%25S|%25s|%25d";
+    sunDataAvailable = true;
+  }
+  
   // Add imperial units if configured
   if (config_imperial) 
   {
@@ -1198,6 +1724,25 @@ bool getWeather()
   String windStr   = result.substring(idx3 + 1, idx4);
   String pressStr  = result.substring(idx4 + 1);
 
+  String sunDawnStr  = "";
+  String sunRiseStr  = "";
+  String sunSetStr   = "";
+  String sunDuskStr  = "";
+
+  if(sunDataAvailable)
+  {
+    int idx5 = result.indexOf('|', idx4 + 1);
+    int idx6 = result.indexOf('|', idx5 + 1);
+    int idx7 = result.indexOf('|', idx6 + 1);
+    int idx8 = result.indexOf('|', idx7 + 1);
+
+    pressStr    = result.substring(idx4 + 1, idx5);
+    sunDawnStr  = result.substring(idx5 + 1, idx6);
+    sunRiseStr  = result.substring(idx6 + 1, idx7);
+    sunSetStr   = result.substring(idx7 + 1, idx8);
+    sunDuskStr  = result.substring(idx8 + 1);
+  }
+
   // Clean Condition:
   tempStr.trim();
   condStr.trim();
@@ -1229,12 +1774,24 @@ bool getWeather()
 
   //Data is valid!!!
 
-  weatherTemp = tempStr; // keep + or - sign if present and the Degree
-  weatherCond = condStr;
-  weatherHum = humStr;
-  weatherWind = windStr;
-  weatherPress = pressStr;
-  weatherLastSuccessfulUpdate = millis();   //Register when we did get the last weather update
+  weather_temp = tempStr; // keep + or - sign if present and the Degree
+  weather_cond = condStr;
+  weather_hum = humStr;
+  weather_wind = windStr;
+  weather_press = pressStr;
+
+  if(sunDataAvailable)
+  {
+    Serial.print(F("Sun dawn=")); Serial.println(sunDawnStr);
+    Serial.print(F("Sunrise=")); Serial.println(sunRiseStr);
+    Serial.print(F("Sunset=")); Serial.println(sunSetStr);
+    Serial.print(F("Sun dusk=")); Serial.println(sunDuskStr);
+    weather_sundawn = sunDawnStr;
+    weather_sunrise = sunRiseStr;
+    weather_sunset  = sunSetStr;
+    weather_sundusk = sunDuskStr;
+  }
+  weather_lastSuccessfulUpdate = millis();   //Register when we did get the last weather update
 
   return true;
 }
