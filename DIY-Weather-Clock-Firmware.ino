@@ -1504,15 +1504,17 @@ void drawTimeScreen()
   display.setCursor(dayX, 0);
   display.print(dayName);
 
-  // In 12-hour mode, show a small AM/PM marker at the top-right corner.
+  // 12-hour AM/PM marker: measured here, drawn small to the right of the time at
+  // the top (same column as the seconds, which sit at the bottom of that column).
+  const char* ampm = (timeinfo.tm_hour < 12) ? "AM" : "PM";
+  uint16_t ampmW = 0, ampmH = 0;
   if (config_time12h)
   {
-    const char* ampm = (timeinfo.tm_hour < 12) ? "AM" : "PM";
-    int16_t ax, ay; uint16_t aw, ah;
-    display.getTextBounds(ampm, 0, 0, &ax, &ay, &aw, &ah);
-    display.setCursor(128 - aw, 0);
-    display.print(ampm);
+    display.setFont(NULL);
+    display.getTextBounds(ampm, 0, 0, &x1, &y1, &ampmW, &ampmH);
   }
+
+  int timeX = 0, timeY = 0;
 
   if(config_showSeconds)
   {
@@ -1542,9 +1544,9 @@ void drawTimeScreen()
     
     display.setFont(&FreeMonoBold18pt7b);
     display.getTextBounds(timeStr, 0, 30, &x1, &y1, &w, &h);
-    int timeX = (128 - w - w2) / 2;
+    timeX = (128 - w - w2) / 2;
     // Vertically center the text around mid (y=32)
-    int timeY = 32 + (h / 2);
+    timeY = 32 + (h / 2);
     display.setCursor(timeX, timeY);
     display.print(timeStr);
 
@@ -1563,11 +1565,23 @@ void drawTimeScreen()
     snprintf(timeBuf, sizeof(timeBuf), "%02d:%02d", displayHour(timeinfo.tm_hour), timeinfo.tm_min);
     String timeStr = String(timeBuf);
     display.getTextBounds(timeStr, 0, 30, &x1, &y1, &w, &h);
-    int timeX = (128 - w) / 2;
+    timeX = (128 - w - (config_time12h ? ampmW + 12 : 0)) / 2;
     // Vertically center the text around mid (y=32)
-    int timeY = 32 + (h / 2);
+    timeY = 32 + (h / 2);
     display.setCursor(timeX, timeY);
     display.print(timeStr);
+  }
+
+  // 12-hour AM/PM marker: small, to the right of the time, aligned with the top
+  // of the big digits (the seconds, when shown, sit lower in the same column).
+  if (config_time12h)
+  {
+    display.setFont(NULL);
+    // Align the marker with the seconds' first digit. The seconds string " :SS"
+    // is drawn at timeX+w (space, ':', digits), so the first digit sits two
+    // classic-font chars (12 px) to the right.
+    display.setCursor(timeX + w + 12, timeY - (int)h);
+    display.print(ampm);
   }
 
   // Bottom left: temperature and humidity
