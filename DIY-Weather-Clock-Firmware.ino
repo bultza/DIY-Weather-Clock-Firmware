@@ -131,6 +131,7 @@ uint8_t calculateDisplayBrightness();
 void setup() 
 {
   String errorMessageDisplay = "";
+  unsigned long ipShownAt = 0;  // millis() when the portal IP was shown (0 = not shown)
   Serial.begin(115200);
   Serial.println();
   Serial.println(F("Booting..."));
@@ -239,11 +240,13 @@ void setup()
       Serial.println(WiFi.localIP());
       if (displayReady)
       {
-        // Show the IP briefly at boot so the user knows where to reach the
-        // configuration web portal (also printed on Serial above).
-        display.print("IP: ");
+        // Add the config portal URL as an extra boot line, and start the 5 s
+        // "keep it readable" timer now. We don't block here: the wait overlaps
+        // the NTP + weather work below and we only pad whatever time is left.
+        display.print("Portal: http://");
         display.println(WiFi.localIP());
         display.display();
+        ipShownAt = millis();
       }
     }
     else 
@@ -273,13 +276,22 @@ void setup()
   {
     Serial.println(F("Initial weather fetch successful."));
   } 
-  else 
+  else
   {
     Serial.println(F("Initial weather fetch failed."));
-  } 
+  }
+
+  // Make sure the portal IP stayed readable for at least 5 s. The NTP and
+  // weather work above already ate part of that time, so only wait for the
+  // remainder (if any) instead of blocking a full 5 s.
+  if (ipShownAt != 0)
+  {
+    unsigned long elapsed = millis() - ipShownAt;
+    if (elapsed < 5000) delay(5000 - elapsed);
+  }
 }
 
-void loop() 
+void loop()
 {
   uint32_t now = millis();
 
