@@ -92,6 +92,9 @@ uint8_t  config_nightContrast     = 1;
 uint16_t config_dawnDuskDuration  = 30;  //minutes
 uint32_t config_sunRise           = 25200;  //in seconds 7h in the morning
 uint32_t config_sunSet            = 75600;   //in seconds 21h at night
+bool     config_hidePlusTemp      = false;  //omit the '+' before positive temperatures
+bool     config_time12h           = false;  //12-hour clock (AM/PM) instead of 24-hour
+bool     config_dateUS            = false;  //date as MM/DD/YYYY instead of DD/MM/YYYY
 
 // Weather data variables:
 String weather_temp    = "N/A";
@@ -113,6 +116,7 @@ bool rebootIn10mins = false;
 void loadSettings();
 void saveSettings();
 void startConfigPortal(String errorMessage);
+void beginWebServer();
 void handleConfigForm();
 void drawTimeScreen();
 void drawWeatherScreen();
@@ -233,7 +237,15 @@ void setup()
       Serial.println(F("WiFi connected."));
       Serial.print(F("IP Address: "));
       Serial.println(WiFi.localIP());
-    } 
+      if (displayReady)
+      {
+        // Show the IP briefly at boot so the user knows where to reach the
+        // configuration web portal (also printed on Serial above).
+        display.print("IP: ");
+        display.println(WiFi.localIP());
+        display.display();
+      }
+    }
     else 
     {
       Serial.println(F("WiFi connection failed. Starting AP mode instead."));
@@ -242,6 +254,10 @@ void setup()
       return; // Exit setup to avoid running normal mode without WiFi
     }
     setupTimeWithDST();
+
+    // Keep the config web portal available during normal operation so the
+    // clock can be reconfigured from a browser (no AP mode / reflash needed).
+    beginWebServer();
 
     // Prepare first weather fetch
     lastWeatherFetch = 0; // force immediate fetch on first weather screen display
@@ -304,6 +320,9 @@ void loop()
     Serial.println(timeBridgness);*/
     return;
   }
+
+  // Serve the configuration web portal during normal operation too.
+  server.handleClient();
 
   // Switch screen every 15 seconds
   if (now - lastScreenSwitch > 15000) 
@@ -494,8 +513,16 @@ void startConfigPortal(String errorMessage)
     display.println(apIP);
     display.display();
   }
+  beginWebServer();
+}
+
+// Registers the config web portal routes and starts the HTTP server. Shared by
+// AP/config mode and normal operation, so the device stays reconfigurable from a
+// browser at its IP without forcing AP mode or reflashing.
+void beginWebServer()
+{
   // Setup web server routes
-  server.on("/", HTTP_GET, []() 
+  server.on("/", HTTP_GET, []()
   {
     // HTML page for config
     String page = "<!DOCTYPE html><html><head><meta charset='UTF-8'>";
@@ -737,7 +764,7 @@ void startConfigPortal(String errorMessage)
 
   server.on("/", HTTP_POST, handleConfigForm);
   server.begin();
-  Serial.println(F("HTTP server started for config portal."));
+  Serial.println(F("HTTP server started."));
 }
 
 void handleConfigForm()
