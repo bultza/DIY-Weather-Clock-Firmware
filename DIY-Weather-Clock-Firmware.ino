@@ -27,7 +27,6 @@
 #include <EEPROM.h>
 #include <ESP8266WiFi.h>
 #include <ESP8266WebServer.h>
-#include <WiFiClientSecure.h>
 #include <WiFiUdp.h>
 #include <Adafruit_SSD1306.h>
 #include <Adafruit_GFX.h>
@@ -1629,8 +1628,10 @@ bool getWeather()
     return getWeatherExpired();
   }
 
-  WiFiClientSecure client;
-  client.setInsecure(); // Skip certificate validation for simplicity
+  // wttr.in now only accepts TLS 1.3, which the ESP8266 (BearSSL, up to TLS 1.2)
+  // cannot negotiate, so we use plain HTTP on port 80. wttr.in serves the
+  // ?format= text response directly over HTTP (200 OK, no redirect to HTTPS).
+  WiFiClient client;
   const char* host = "wttr.in";
   // Encode city only for URL
   String cityEnc = urlEncode(config_city);
@@ -1666,9 +1667,28 @@ bool getWeather()
   client.setTimeout(10000);          // read timeout (ms)
   //client.setHandshakeTimeout(15);    // TLS handshake (s)
 
-  if (!client.connect(host, 443)) 
+  // ---- DIAGNOSTICS (only logging, no behaviour change) ----
+  Serial.print(F("[DIAG] Free heap before connect: "));
+  Serial.println(ESP.getFreeHeap());
+  IPAddress diagIP;
+  if (WiFi.hostByName(host, diagIP))
+  {
+    Serial.print(F("[DIAG] DNS "));
+    Serial.print(host);
+    Serial.print(F(" -> "));
+    Serial.println(diagIP.toString());
+  }
+  else
+  {
+    Serial.println(F("[DIAG] DNS resolution FAILED"));
+  }
+  // ---------------------------------------------------------
+
+  if (!client.connect(host, 80))
   {
     Serial.println(F("Connection failed."));
+    Serial.print(F("[DIAG] Free heap after fail: "));
+    Serial.println(ESP.getFreeHeap());
     return getWeatherExpired();
   }
 
