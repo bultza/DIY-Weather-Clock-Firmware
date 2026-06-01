@@ -629,6 +629,37 @@ void beginWebServer()
 
     page += "</div></div>";
 
+    // Time format radio (24h / 12h)
+    page += "<div class='row'><label>Time format:</label>";
+    page += "<div class='radiowrap'>";
+    page += "<label class='radioopt'><input type='radio' name='timefmt' value='24'";
+    if (!config_time12h) page += " checked";
+    page += ">24-hour</label>";
+    page += "<label class='radioopt'><input type='radio' name='timefmt' value='12'";
+    if (config_time12h) page += " checked";
+    page += ">12-hour</label>";
+    page += "</div></div>";
+
+    // Date format radio (DD/MM/YYYY / MM/DD/YYYY)
+    page += "<div class='row'><label>Date format:</label>";
+    page += "<div class='radiowrap'>";
+    page += "<label class='radioopt'><input type='radio' name='datefmt' value='dmy'";
+    if (!config_dateUS) page += " checked";
+    page += ">DD/MM/YYYY</label>";
+    page += "<label class='radioopt'><input type='radio' name='datefmt' value='mdy'";
+    if (config_dateUS) page += " checked";
+    page += ">MM/DD/YYYY</label>";
+    page += "</div></div>";
+
+    // Hide '+' on positive temperature checkbox
+    page += "<div class='row'><label>Hide + on positive temp:</label>";
+    page += "<div class='checkwrap'>";
+    page += "<input type='checkbox' name='hideplus' value='1'";
+    if (config_hidePlusTemp) page += " checked";
+    page += ">";
+    page += "<span></span>";
+    page += "</div></div>";
+
     // -------------------------
     // Contrast configuration UI
     // -------------------------
@@ -780,6 +811,11 @@ void handleConfigForm()
   bool   showSeconds = server.hasArg("showseconds"); // checkbox: present => true
   String units       = server.arg("units");          // "metric" or "imperial"
 
+  // Display format fields
+  bool   hidePlusTemp = server.hasArg("hideplus");   // checkbox: present => true
+  bool   time12h      = (server.arg("timefmt") == "12");
+  bool   dateUS       = (server.arg("datefmt") == "mdy");
+
   // New contrast fields (from the updated UI)
   bool variableContrast   = server.hasArg("variableContrast");
   bool contrastFollowSun  = server.hasArg("contrastFollowSun");
@@ -920,6 +956,10 @@ void handleConfigForm()
   config_showSeconds = showSeconds;
   config_imperial    = imperial;
 
+  config_hidePlusTemp = hidePlusTemp;
+  config_time12h      = time12h;
+  config_dateUS       = dateUS;
+
   // New config vars
   config_variableContrast  = variableContrast;
   config_contrastFollowSun = contrastFollowSun;
@@ -1004,6 +1044,10 @@ void loadSettings()
     config_sunRise          = 25200; // 07:00
     config_sunSet           = 75600; // 21:00
 
+    config_hidePlusTemp = false;
+    config_time12h      = false;
+    config_dateUS       = false;
+
     Serial.println(F("EEPROM signature invalid or mismatched. Using defaults."));
     return;
   }
@@ -1027,6 +1071,9 @@ void loadSettings()
   config_imperial          = (flags & (1 << 2)) != 0;
   config_variableContrast  = (flags & (1 << 3)) != 0;
   config_contrastFollowSun = (flags & (1 << 4)) != 0;
+  config_hidePlusTemp      = (flags & (1 << 5)) != 0;
+  config_time12h           = (flags & (1 << 6)) != 0;
+  config_dateUS            = (flags & (1 << 7)) != 0;
 
   // --- Read extra variables (layout must match saveSettings) ---
   const int A_DAY_CONTRAST   = ADDR_VARIABLES + 1;
@@ -1125,9 +1172,12 @@ void saveSettings()
   if (config_timezone_manual) flags  |= (1 << 0);
   if (config_showSeconds)     flags  |= (1 << 1);
   if (config_imperial)        flags  |= (1 << 2);
-  if (config_variableContrast)flags  |= (1 << 3); 
+  if (config_variableContrast)flags  |= (1 << 3);
   if (config_contrastFollowSun)flags |= (1 << 4);
-  
+  if (config_hidePlusTemp)    flags  |= (1 << 5);
+  if (config_time12h)         flags  |= (1 << 6);
+  if (config_dateUS)          flags  |= (1 << 7);
+
 
   EEPROM.write(ADDR_VARIABLES, flags);
 
@@ -1386,7 +1436,25 @@ static String sanitizeTempForDisplay(const String& t)
   return out;
 }
 
-void drawTimeScreen() 
+// Sanitized temperature, with the leading '+' optionally removed for positive
+// values (config_hidePlusTemp). Used by both the clock and weather screens.
+static String tempForDisplay(const String& t)
+{
+  String out = sanitizeTempForDisplay(t);
+  if (config_hidePlusTemp && out.startsWith("+")) out.remove(0, 1);
+  return out;
+}
+
+// Format the hour for display, honoring the 12h/24h setting. In 12-hour mode the
+// hour is mapped to 1..12; the AM/PM marker is drawn separately.
+static int displayHour(int hour24)
+{
+  if (!config_time12h) return hour24;
+  int h = hour24 % 12;
+  return (h == 0) ? 12 : h;
+}
+
+void drawTimeScreen()
 {
   if (!displayInitialized) 
   {
@@ -1423,6 +1491,17 @@ void drawTimeScreen()
   int dayX = (128 - w) / 2;
   display.setCursor(dayX, 0);
   display.print(dayName);
+
+  // In 12-hour mode, show a small AM/PM marker at the top-right corner.
+  if (config_time12h)
+  {
+    const char* ampm = (timeinfo.tm_hour < 12) ? "AM" : "PM";
+    int16_t ax, ay; uint16_t aw, ah;
+    display.getTextBounds(ampm, 0, 0, &ax, &ay, &aw, &ah);
+    display.setCursor(128 - aw, 0);
+    display.print(ampm);
+  }
+
   if(config_showSeconds)
   {
     // Time HH:MM in large font, and :ss in small font
@@ -1442,7 +1521,7 @@ void drawTimeScreen()
     // Format time as HH:MM
     char timeBuf[6];
     char secBuf[5];
-    snprintf(timeBuf, sizeof(timeBuf), "%02d:%02d", timeinfo.tm_hour, timeinfo.tm_min);
+    snprintf(timeBuf, sizeof(timeBuf), "%02d:%02d", displayHour(timeinfo.tm_hour), timeinfo.tm_min);
     snprintf(secBuf, sizeof(secBuf), " :%02d", timeinfo.tm_sec);
     String timeStr = String(timeBuf);
     String secStr = String(secBuf);
@@ -1469,7 +1548,7 @@ void drawTimeScreen()
     display.setFont(&FreeMonoBold18pt7b);
     // Format time as HH:MM
     char timeBuf[6];
-    snprintf(timeBuf, sizeof(timeBuf), "%02d:%02d", timeinfo.tm_hour, timeinfo.tm_min);
+    snprintf(timeBuf, sizeof(timeBuf), "%02d:%02d", displayHour(timeinfo.tm_hour), timeinfo.tm_min);
     String timeStr = String(timeBuf);
     display.getTextBounds(timeStr, 0, 30, &x1, &y1, &w, &h);
     int timeX = (128 - w) / 2;
@@ -1484,7 +1563,7 @@ void drawTimeScreen()
   display.setCursor(0, 56);
   if (weather_valid && weather_temp != "N/A" && weather_hum != "") 
   {
-    String tempDisplay = sanitizeTempForDisplay(weather_temp);
+    String tempDisplay = tempForDisplay(weather_temp);
     display.print(tempDisplay);
     display.print((char)247); // degree symbol (your display's charset)
     display.print(config_imperial ? "F " : "C ");
@@ -1495,12 +1574,15 @@ void drawTimeScreen()
     display.print("N/A");
   }
 
-  // Bottom right: date dd.mm.yyyy
+  // Bottom right: date (DD/MM/YYYY or MM/DD/YYYY depending on config)
   int day = timeinfo.tm_mday;
   int month = timeinfo.tm_mon + 1;
   int year = timeinfo.tm_year + 1900;
   char dateBuf[12];
-  snprintf(dateBuf, sizeof(dateBuf), "%02d/%02d/%04d", day, month, year);
+  if (config_dateUS)
+    snprintf(dateBuf, sizeof(dateBuf), "%02d/%02d/%04d", month, day, year);
+  else
+    snprintf(dateBuf, sizeof(dateBuf), "%02d/%02d/%04d", day, month, year);
   String dateStr = String(dateBuf);
   display.getTextBounds(dateStr, 0, 0, &x1, &y1, &w, &h);
   display.setCursor(128 - w, 56);
@@ -1531,7 +1613,7 @@ void drawWeatherScreen()
   if (weather_valid && weather_temp != "N/A") 
   {
     // weatherTemp is e.g. "+12" or "-3" as string (cleaned)
-    String tempNum = sanitizeTempForDisplay(weather_temp);
+    String tempNum = tempForDisplay(weather_temp);
     // Center the numeric part
     display.getTextBounds(tempNum, 0, 30, &x1, &y1, &w, &h);
     int tempX = (128 - (w + 12)) / 2; // leave space for degree and C (~12px)
