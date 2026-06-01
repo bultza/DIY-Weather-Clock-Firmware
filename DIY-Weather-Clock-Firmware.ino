@@ -28,6 +28,16 @@
 #include <ESP8266WiFi.h>
 #include <ESP8266WebServer.h>
 #include <WiFiUdp.h>
+// --- wolfSSL (TLS 1.3) ---
+// Requires the "wolfssl" library (Arduino Library Manager). wttr.in only speaks
+// TLS 1.3, which the ESP8266's built-in BearSSL cannot do; wolfSSL can.
+// NOTE: the stock user_settings.h (libraries/wolfssl/src/) already enables
+// TLS 1.3 for ESP8266 (the `#if defined(ESP8266)` block turns on WOLFSSL_TLS13,
+// HAVE_TLS_EXTENSIONS, HAVE_SUPPORTED_CURVES, HKDF, AEAD; HAVE_ECC is global).
+// It also defines WOLFSSL_USER_IO, which is why the custom I/O callbacks below
+// are mandatory. Key exchange uses ECC P-256 (no CURVE25519 in that config).
+#include <wolfssl.h>
+#include <wolfssl/ssl.h>
 #include <Adafruit_SSD1306.h>
 #include <Adafruit_GFX.h>
 #include <Fonts/FreeMonoBold18pt7b.h>
@@ -1621,16 +1631,37 @@ bool getWeatherExpired()
 
 uint32_t getWeatherCounter = 0;
 
-bool getWeather() 
+// --- wolfSSL transport callbacks ---
+// wolfSSL does not know about Arduino sockets, so we bridge its I/O to a plain
+// WiFiClient passed as the context pointer (set via wolfSSL_SetIORead/WriteCtx).
+static int wolfIOSend(WOLFSSL* ssl, char* buf, int sz, void* ctx)
+{
+  WiFiClient* c = (WiFiClient*)ctx;
+  if (!c || !c->connected()) return WOLFSSL_CBIO_ERR_CONN_CLOSE;
+  int sent = c->write((const uint8_t*)buf, sz);
+  if (sent <= 0) return WOLFSSL_CBIO_ERR_WANT_WRITE;
+  return sent;
+}
+
+static int wolfIORecv(WOLFSSL* ssl, char* buf, int sz, void* ctx)
+{
+  WiFiClient* c = (WiFiClient*)ctx;
+  if (!c) return WOLFSSL_CBIO_ERR_GENERAL;
+  int n = c->read((uint8_t*)buf, sz);
+  if (n > 0) return n;
+  if (!c->connected()) return WOLFSSL_CBIO_ERR_CONN_CLOSE;
+  return WOLFSSL_CBIO_ERR_WANT_READ; // nothing available yet, ask wolfSSL to retry
+}
+
+bool getWeather()
 {
   if (WiFi.status() != WL_CONNECTED) {
     Serial.println(F("WiFi not connected, cannot get weather."));
     return getWeatherExpired();
   }
 
-  // wttr.in now only accepts TLS 1.3, which the ESP8266 (BearSSL, up to TLS 1.2)
-  // cannot negotiate, so we use plain HTTP on port 80. wttr.in serves the
-  // ?format= text response directly over HTTP (200 OK, no redirect to HTTPS).
+  // wttr.in only accepts TLS 1.3. The ESP8266's built-in BearSSL caps at TLS 1.2,
+  // so we drive the handshake with wolfSSL over a plain WiFiClient TCP socket.
   WiFiClient client;
   const char* host = "wttr.in";
   // Encode city only for URL
@@ -1684,30 +1715,106 @@ bool getWeather()
   }
   // ---------------------------------------------------------
 
-  if (!client.connect(host, 80))
+  // 1) Plain TCP to port 443 (wolfSSL rides on top of this socket)
+  if (!client.connect(host, 443))
   {
-    Serial.println(F("Connection failed."));
+    Serial.println(F("TCP connection failed."));
     Serial.print(F("[DIAG] Free heap after fail: "));
     Serial.println(ESP.getFreeHeap());
     return getWeatherExpired();
   }
 
-  // Send GET request
-  client.print(String("GET ") + url + " HTTP/1.1\r\n" +
+  // 2) wolfSSL TLS 1.3 context + session over that socket.
+  //    Created per-fetch and freed below so the TLS RAM is released between the
+  //    (15-minute) weather updates instead of being held for the whole runtime.
+  wolfSSL_Init();
+  // Uncomment to get the full wolfSSL handshake trace on Serial when debugging a
+  // failing TLS connection (requires DEBUG_WOLFSSL in user_settings.h, which the
+  // stock ESP8266 config has on). Very verbose; leave off for normal operation.
+  //wolfSSL_Debugging_ON();
+  WOLFSSL_CTX* ctx = wolfSSL_CTX_new(wolfTLSv1_3_client_method());
+  if (!ctx)
+  {
+    Serial.println(F("[DIAG] wolfSSL_CTX_new failed (out of RAM?)"));
+    Serial.print(F("[DIAG] Free heap: ")); Serial.println(ESP.getFreeHeap());
+    client.stop();
+    return getWeatherExpired();
+  }
+  // Skip certificate verification (equivalent to the old setInsecure()).
+  wolfSSL_CTX_set_verify(ctx, WOLFSSL_VERIFY_NONE, NULL);
+  // Bridge wolfSSL I/O to our WiFiClient.
+  wolfSSL_SetIOSend(ctx, wolfIOSend);
+  wolfSSL_SetIORecv(ctx, wolfIORecv);
+
+  WOLFSSL* ssl = wolfSSL_new(ctx);
+  if (!ssl)
+  {
+    Serial.println(F("[DIAG] wolfSSL_new failed (out of RAM?)"));
+    Serial.print(F("[DIAG] Free heap: ")); Serial.println(ESP.getFreeHeap());
+    wolfSSL_CTX_free(ctx);
+    client.stop();
+    return getWeatherExpired();
+  }
+  wolfSSL_SetIOReadCtx(ssl, &client);
+  wolfSSL_SetIOWriteCtx(ssl, &client);
+  // SNI: wttr.in is behind a vhost, so the server name is required.
+  wolfSSL_UseSNI(ssl, WOLFSSL_SNI_HOST_NAME, host, strlen(host));
+
+  // 3) TLS handshake
+  int hs = wolfSSL_connect(ssl);
+  if (hs != WOLFSSL_SUCCESS)
+  {
+    int err = wolfSSL_get_error(ssl, hs);
+    char errStr[80];
+    wolfSSL_ERR_error_string(err, errStr);
+    Serial.print(F("[DIAG] wolfSSL_connect failed, err="));
+    Serial.print(err); Serial.print(F(" "));
+    Serial.println(errStr);
+    Serial.print(F("[DIAG] Free heap after handshake fail: "));
+    Serial.println(ESP.getFreeHeap());
+    wolfSSL_free(ssl);
+    wolfSSL_CTX_free(ctx);
+    client.stop();
+    return getWeatherExpired();
+  }
+  Serial.print(F("[DIAG] TLS connected: "));
+  Serial.println(wolfSSL_get_version(ssl));
+
+  // 4) Send GET request over TLS
+  String req = String("GET ") + url + " HTTP/1.1\r\n" +
                "Host: " + host + "\r\n" +
                "User-Agent: ESP8266\r\n" +
-               "Connection: close\r\n\r\n");
- // Read full response as raw text
+               "Connection: close\r\n\r\n";
+  wolfSSL_write(ssl, req.c_str(), req.length());
+
+  // 5) Read full response as raw text (decrypted by wolfSSL)
   String response = "";
+  char buf[256];
   unsigned long timeout = millis() + 15000;
-  while (millis() < timeout && client.connected()) 
+  while (millis() < timeout)
   {
-    while (client.available()) 
+    int n = wolfSSL_read(ssl, buf, sizeof(buf) - 1);
+    if (n > 0)
     {
-      char c = client.read();
-      response += c;
+      buf[n] = '\0';
+      response += buf;
+    }
+    else
+    {
+      int e = wolfSSL_get_error(ssl, n);
+      if (e == WOLFSSL_ERROR_WANT_READ || e == WOLFSSL_ERROR_WANT_WRITE)
+      {
+        delay(5);   // no data yet, let the socket fill
+        continue;
+      }
+      break;        // clean close (peer closed) or fatal error
     }
   }
+
+  // 6) Tear down TLS + socket, releasing the handshake RAM
+  wolfSSL_shutdown(ssl);
+  wolfSSL_free(ssl);
+  wolfSSL_CTX_free(ctx);
   client.stop();
 
   Serial.println(F("---- RAW RESPONSE ----"));

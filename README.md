@@ -112,8 +112,45 @@ Software:
 - Install required libraries using the Arduino Library Manager:
   - Adafruit SSD1306 (by Adafruit)
   - Adafruit GFX Library (by Adafruit)
+  - **wolfssl** (by wolfSSL Inc.) — only needed on this `feature_tls1.3` branch, see below
   - Any dependencies pulled by those libraries
 - Compile and upload the firmware
+
+## TLS 1.3 build (this branch only — experimental)
+
+wttr.in dropped everything below TLS 1.3, and the ESP8266's built-in BearSSL
+only speaks up to TLS 1.2. This branch swaps the weather transport to **wolfSSL**
+(which supports TLS 1.3) driven over a plain `WiFiClient`.
+
+To reproduce the exact working-build state:
+
+1. Install the **wolfssl** library from the Arduino Library Manager (tested with
+   v5.8.2).
+2. Patch the library's `user_settings.h` (it lives in
+   `<your sketchbook>/libraries/wolfssl/src/user_settings.h`). Run the included
+   [`apply_wolfssl_patch.ps1`](apply_wolfssl_patch.ps1) from PowerShell — it edits
+   the file in place, is content-based (survives version differences) and safe to
+   re-run:
+   ```powershell
+   .\apply_wolfssl_patch.ps1
+   # or, if your sketchbook is not in the default Documents\Arduino location:
+   .\apply_wolfssl_patch.ps1 -UserSettings "C:\path\to\libraries\wolfssl\src\user_settings.h"
+   ```
+   If you'd rather edit by hand, the script makes exactly these four changes
+   inside the `#if defined(ESP8266)` block / globals:
+   - add `#define HAVE_SNI` (SNI for the wttr.in vhost),
+   - add `#define WOLFSSL_NO_TLS12` (drop TLS 1.2 to save RAM/flash),
+   - comment out `#define DEBUG_WOLFSSL` (its strings sit in DRAM on ESP8266),
+   - comment out `#define WOLFSSL_HW_METRICS` (static counters, ESP-IDF only).
+3. Set a generous Flash Size in Tools (e.g. `1M (FS:none)`), compile and flash.
+
+> ⚠️ **Known result on the ESP-01S: it links but does not run.** wolfSSL's
+> constant crypto tables (ECC, ASN/OID) are kept in DRAM by the Arduino ESP8266
+> core (no automatic `.rodata`-in-flash), eating ~26 KB and leaving only ~6.5 KB
+> of free heap at runtime — far below the ~20-30 KB a TLS 1.3 handshake needs, so
+> `wolfSSL_new()` fails out of memory. This branch is kept as a documented
+> dead-end; the shipping firmware on `main`/`develop` talks to wttr.in a
+> different way.
 
 
 ## Resources
