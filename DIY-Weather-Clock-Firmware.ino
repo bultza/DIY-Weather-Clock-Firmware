@@ -243,7 +243,7 @@ void setup()
         // Add the config portal URL as an extra boot line, and start the 5 s
         // "keep it readable" timer now. We don't block here: the wait overlaps
         // the NTP + weather work below and we only pad whatever time is left.
-        display.print("Portal: http://");
+        display.print("http://");
         display.println(WiFi.localIP());
         display.display();
         ipShownAt = millis();
@@ -281,13 +281,13 @@ void setup()
     Serial.println(F("Initial weather fetch failed."));
   }
 
-  // Make sure the portal IP stayed readable for at least 5 s. The NTP and
+  // Make sure the portal IP stayed readable for at least 8 s. The NTP and
   // weather work above already ate part of that time, so only wait for the
-  // remainder (if any) instead of blocking a full 5 s.
+  // remainder (if any) instead of blocking a full 8 s.
   if (ipShownAt != 0)
   {
     unsigned long elapsed = millis() - ipShownAt;
-    if (elapsed < 5000) delay(5000 - elapsed);
+    if (elapsed < 8000) delay(8000 - elapsed);
   }
 }
 
