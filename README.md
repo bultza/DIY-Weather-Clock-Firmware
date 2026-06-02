@@ -57,6 +57,9 @@ Once configured and rebooted:
   to force AP mode or re-flash
 - The device's serial log is kept in a small RAM buffer and can be viewed from a
   web page, so you can debug the clock over Wi-Fi without a serial cable
+- Firmware can be updated over the air (OTA): once it is running, you can upload a
+  new `.bin` from a browser at `http://<device-ip>/update`, so you only need the
+  USB/FTDI cable for the very first flash
 
 Every 15 seconds the display toggles between:
 - Clock view
@@ -77,6 +80,7 @@ automatically without rebooting.
 - Weather hidden when not available
 - Configuration web portal always reachable on the network (reconfigure anytime)
 - Serial log viewable from a web page (remote debugging without a cable)
+- Over-the-air (OTA) firmware updates from a web page (no cable after the first flash)
 - More predictable behavior
 
 
@@ -120,8 +124,38 @@ Software:
   - Adafruit SSD1306 (by Adafruit)
   - Adafruit GFX Library (by Adafruit)
   - Any dependencies pulled by those libraries
+- Before compiling, set the flash layout so OTA updates fit (see warning below):
+  - Tools -> Flash Size -> **"1MB (FS:none OTA:~502KB)"**
 - Compile and upload the firmware
 
+> :warning: You MUST select **Flash Size = "1MB (FS:none OTA:~502KB)"** in the
+> Tools menu. This firmware uses no filesystem, so this layout reclaims that space
+> for the program and leaves ~500KB free for the new image during an OTA update.
+> Any other 1MB layout (the default reserves 256KB for a filesystem) leaves almost
+> no room for OTA and the `/update` page will reject the new firmware. If you build
+> with PlatformIO instead, this is already handled by `platformio.ini`
+> (`board_build.ldscript = eagle.flash.1m.ld`).
+
+## Updating over the air (OTA)
+
+After the firmware is running, you no longer need the USB/FTDI cable to update it:
+
+1. Build the new firmware and locate the binary:
+   - Arduino IDE: **Sketch -> Export Compiled Binary**, then grab
+     `DIY-Weather-Clock-Firmware.ino.bin`
+   - PlatformIO: `.pio/build/esp01_1m/firmware.bin`
+2. Open `http://<device-ip>/update` in a browser (the device IP is shown on the
+   OLED at boot, and there is also an "Update firmware (OTA)" button on the
+   configuration page).
+3. Upload the `.bin`. The clock flashes it and reboots into the new version. Your
+   saved configuration in EEPROM is preserved.
+
+> :warning: The OTA upload page has no password. Anyone on the same network can
+> push firmware to the clock. This is fine for a trusted home LAN; do not expose
+> the device to untrusted networks.
+
+> :warning: The very first flash must still be done over the USB/FTDI cable — the
+> factory firmware does not have the OTA update page.
 
 ## Resources
 - Original firmware and inspiration: https://www.whynot.org.ua/en/electronic-kits/hu-061-diy-kit-wi-fi-weather-forecast-clock
