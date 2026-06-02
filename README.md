@@ -52,6 +52,11 @@ Once configured and rebooted:
 - Time is synchronized using NTP pool servers
 - Timezone handling uses proper DST rules (not fixed offsets)
 - Weather data is retrieved from wttr.in every 15 minutes
+- The configuration web portal stays available at the device's IP (shown on the
+  OLED at boot), so you can reconfigure it from a browser at any time — no need
+  to force AP mode or re-flash
+- The device's serial log is kept in a small RAM buffer and can be viewed from a
+  web page, so you can debug the clock over Wi-Fi without a serial cable
 
 Every 15 seconds the display toggles between:
 - Clock view
@@ -70,6 +75,8 @@ automatically without rebooting.
 - Optional seconds display
 - Support for cities with spaces and special characters
 - Weather hidden when not available
+- Configuration web portal always reachable on the network (reconfigure anytime)
+- Serial log viewable from a web page (remote debugging without a cable)
 - More predictable behavior
 
 

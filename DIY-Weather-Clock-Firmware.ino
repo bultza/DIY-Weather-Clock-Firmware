@@ -38,6 +38,9 @@
 #include <Fonts/FreeSans9pt7b.h>  //Small cute font
 #include <time.h>
 
+// Firmware version (bump this on each release)
+#define FW_VERSION "V1.3.0"
+
 // Pin definitions (ESP-01):
 const uint8_t SDA_PIN = 0;           // I2C SDA connected to GPIO0
 const uint8_t SCL_PIN = 2;           // I2C SCL connected to GPIO2
@@ -61,6 +64,46 @@ const char *AP_PASSWD = "hackmeinnow";      //Password for the Access Point
 // Display:
 Adafruit_SSD1306 display(128, 64, &Wire, -1);
 bool displayInitialized = false;
+
+// --- Serial log mirrored into a circular RAM buffer (viewable at /log) ---
+// Everything that used to go to Log.print now goes through Log instead, which
+// echoes to Serial AND keeps the last LOG_BUF_SIZE bytes in RAM so they can be
+// dumped from the web portal. Three pieces of state, as planned: the buffer, the
+// write position (the "end") and a wrapped flag (so we know where the start is).
+#define LOG_BUF_SIZE 4096          // fixed slice of RAM; raise/lower here
+char   logBuf[LOG_BUF_SIZE];       // the circular buffer (globals are zero-init)
+size_t logPos     = 0;             // next write index (== logical end)
+bool   logWrapped = false;         // true once the buffer has overflowed and wrapped
+
+static inline void logPush(uint8_t c)
+{
+  logBuf[logPos++] = (char)c;
+  if (logPos >= LOG_BUF_SIZE)
+  {
+    logPos = 0;
+    logWrapped = true;
+  }
+}
+
+// Print subclass: all print()/println() overloads come for free from Print and
+// are routed through write(), so we only mirror the bytes here.
+class RingLog : public Print
+{
+public:
+  size_t write(uint8_t c) override
+  {
+    Serial.write(c);
+    logPush(c);
+    return 1;
+  }
+  size_t write(const uint8_t *buffer, size_t size) override
+  {
+    Serial.write(buffer, size);
+    for (size_t i = 0; i < size; i++) logPush(buffer[i]);
+    return size;
+  }
+};
+RingLog Log;
 
 // Time and weather:
 WiFiUDP ntpUDP;
@@ -118,6 +161,8 @@ void saveSettings();
 void startConfigPortal(String errorMessage);
 void beginWebServer();
 void handleConfigForm();
+void handleLog();
+void handleForceWeather();
 void drawTimeScreen();
 void drawWeatherScreen();
 bool getWeather();
@@ -133,8 +178,13 @@ void setup()
   String errorMessageDisplay = "";
   unsigned long ipShownAt = 0;  // millis() when the portal IP was shown (0 = not shown)
   Serial.begin(115200);
-  Serial.println();
-  Serial.println(F("Booting..."));
+  Log.println();
+  Log.print(F("Booting from firmware "));
+  Log.println(F(FW_VERSION));
+  Log.print(F("Compiled: "));
+  Log.print(F(__DATE__));
+  Log.print(' ');
+  Log.println(F(__TIME__));
 
   // Initialize display
   Wire.begin(SDA_PIN, SCL_PIN);
@@ -144,13 +194,15 @@ void setup()
     display.setRotation(2);
     display.clearDisplay();
     display.setTextColor(SSD1306_WHITE);
-    display.println("Booting...");
+    display.println("Booting from");
+    display.print("firmware ");
+    display.println(FW_VERSION);
     display.display();
     displayReady = true;
   } 
   else 
   {
-    Serial.println(F("SSD1306 allocation failed"));
+    Log.println(F("SSD1306 allocation failed"));
     // Leave displayInitialized as false
   }
 
@@ -165,11 +217,11 @@ void setup()
       EEPROM.read(ADDR_SIGNATURE + 2) == 'G' &&
       EEPROM.read(ADDR_SIGNATURE + 3) == DEVICE_SIGNATURE) 
   {
-    Serial.println(F("Config signature found in EEPROM."));
+    Log.println(F("Config signature found in EEPROM."));
   } 
   else 
   {
-    Serial.println(F("No config signature found (EEPROM uninitialized)."));
+    Log.println(F("No config signature found (EEPROM uninitialized)."));
     errorMessageDisplay = "No valid configuration found!";
   }
 
@@ -187,7 +239,7 @@ void setup()
   }
   if (buttonPressed) 
   {
-    Serial.println(F("Config button held - entering AP configuration mode."));
+    Log.println(F("Config button held - entering AP configuration mode."));
   }
 
   // Determine if we should start config portal
@@ -219,8 +271,8 @@ void setup()
   {
     // Load settings from EEPROM
     loadSettings();
-    Serial.print(F("Connecting to WiFi: "));
-    Serial.println(config_wifiSSID);
+    Log.print(F("Connecting to WiFi: "));
+    Log.println(config_wifiSSID);
     display.println("Connecting to WiFi...");
     display.display();
     WiFi.mode(WIFI_STA);
@@ -230,14 +282,14 @@ void setup()
     while (WiFi.status() != WL_CONNECTED && millis() - wifiStart < 30000) 
     {
       delay(500);
-      Serial.print('.');
+      Log.print('.');
     }
-    Serial.println();
+    Log.println();
     if (WiFi.status() == WL_CONNECTED) 
     {
-      Serial.println(F("WiFi connected."));
-      Serial.print(F("IP Address: "));
-      Serial.println(WiFi.localIP());
+      Log.println(F("WiFi connected."));
+      Log.print(F("IP Address: "));
+      Log.println(WiFi.localIP());
       if (displayReady)
       {
         // Add the config portal URL as an extra boot line, and start the 5 s
@@ -251,7 +303,7 @@ void setup()
     }
     else 
     {
-      Serial.println(F("WiFi connection failed. Starting AP mode instead."));
+      Log.println(F("WiFi connection failed. Starting AP mode instead."));
       startConfigPortal("WiFi connect failed!");
       rebootIn10mins = true;
       return; // Exit setup to avoid running normal mode without WiFi
@@ -265,20 +317,20 @@ void setup()
     // Prepare first weather fetch
     lastWeatherFetch = 0; // force immediate fetch on first weather screen display
     weather_valid = false;
-    Serial.println(F("Setup complete, entering loop."));
+    Log.println(F("Setup complete, entering loop."));
   }
-  Serial.println(F("Fetching initial weather..."));
+  Log.println(F("Fetching initial weather..."));
   display.println("Fetching weather...");
   display.display();
   weather_valid = getWeather();
   lastWeatherFetch = millis();
   if (weather_valid) 
   {
-    Serial.println(F("Initial weather fetch successful."));
+    Log.println(F("Initial weather fetch successful."));
   } 
   else
   {
-    Serial.println(F("Initial weather fetch failed."));
+    Log.println(F("Initial weather fetch failed."));
   }
 
   // Make sure the portal IP stayed readable for at least 8 s. The NTP and
@@ -298,7 +350,7 @@ void loop()
   //Reboot after 49 days of continues use, to avoid millis() rollover problems :-D
   if (now > REBOOT_AFTER_MS) 
   {
-    Serial.println(F("Uptime > 49 days, rebooting to avoid millis() rollover"));
+    Log.println(F("Uptime > 49 days, rebooting to avoid millis() rollover"));
     delay(100);
     ESP.restart();
   }
@@ -310,7 +362,7 @@ void loop()
     {
       if (now > 600000)
       {
-        Serial.println(F("Uptime > 10 minutes and no Wifi was connected so we reboot..."));
+        Log.println(F("Uptime > 10 minutes and no Wifi was connected so we reboot..."));
         delay(100);
         ESP.restart();
       }
@@ -329,7 +381,7 @@ void loop()
     display.println(timeBridgness);
     display.println("======");
     display.display();
-    Serial.println(timeBridgness);*/
+    Log.println(timeBridgness);*/
     return;
   }
 
@@ -350,16 +402,16 @@ void loop()
       // Update weather every 15 minutes
       if (millis() - lastWeatherFetch > 900000UL /*|| !weatherValid*/) 
       {
-        Serial.println(F("Updating weather data..."));
+        Log.println(F("Updating weather data..."));
         weather_valid = getWeather();
         lastWeatherFetch = millis();
         if (weather_valid) 
         {
-          Serial.println(F("Weather update successful."));
+          Log.println(F("Weather update successful."));
         } 
         else 
         {
-          Serial.println(F("Weather update failed or data invalid."));
+          Log.println(F("Weather update failed or data invalid."));
         }
       }
     }
@@ -385,7 +437,7 @@ void serialPrintTime()
   struct tm timeinfo;
 
   if (!getLocalTime(&timeinfo)) {
-    Serial.println("Time is: <not set>");
+    Log.println("Time is: <not set>");
     return;
   }
 
@@ -397,13 +449,13 @@ void serialPrintTime()
     &timeinfo
   );
 
-  Serial.println(buf);
+  Log.println(buf);
 }
 
 // Callback when SNTP sets time
 void timeSyncCallback(struct timeval *tv) 
 {
-  Serial.println("SNTP: time synchronized.");
+  Log.println("SNTP: time synchronized.");
 }
 
 void setupTimeWithDST() 
@@ -414,22 +466,22 @@ void setupTimeWithDST()
     tz = config_timezone.c_str();
   }
 
-  Serial.print("Setting TZ via configTzTime(): ");
-  Serial.println(tz);
+  Log.print("Setting TZ via configTzTime(): ");
+  Log.println(tz);
 
   configTzTime(tz, NTP1, NTP2);
 }
 
 void debugTZ()
 {
-  Serial.print("config_timezone (String): '");
-  Serial.print(config_timezone);
-  Serial.println("'");
+  Log.print("config_timezone (String): '");
+  Log.print(config_timezone);
+  Log.println("'");
 
   const char* tzEnv = getenv("TZ");
-  Serial.print("getenv('TZ'): '");
-  Serial.print(tzEnv ? tzEnv : "<null>");
-  Serial.println("'");
+  Log.print("getenv('TZ'): '");
+  Log.print(tzEnv ? tzEnv : "<null>");
+  Log.println("'");
 
   time_t now = time(nullptr);
 
@@ -438,8 +490,8 @@ void debugTZ()
 
   char buf[64];
   strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S %Z", &local);
-  Serial.print("localtime: ");
-  Serial.println(buf);
+  Log.print("localtime: ");
+  Log.println(buf);
 
   // numeric offset proof (local - utc)
   struct tm utc;
@@ -453,8 +505,8 @@ void debugTZ()
     offset += (local.tm_yday > utc.tm_yday) ? 86400 : -86400;
   }
 
-  Serial.print("UTC offset (s): ");
-  Serial.println(offset);
+  Log.print("UTC offset (s): ");
+  Log.println(offset);
 }
 
 static String htmlEscape(const String& s)
@@ -497,10 +549,10 @@ void startConfigPortal(String errorMessage)
   WiFi.mode(WIFI_AP);
   WiFi.softAP(AP_SSID, AP_PASSWD);
   IPAddress apIP = WiFi.softAPIP();
-  Serial.print(F("Started AP mode with SSID "));
-  Serial.print(AP_SSID);
-  Serial.print(F(". Connect and browse to http://"));
-  Serial.println(apIP);
+  Log.print(F("Started AP mode with SSID "));
+  Log.print(AP_SSID);
+  Log.print(F(". Connect and browse to http://"));
+  Log.println(apIP);
 
   if (displayReady) 
   {
@@ -562,6 +614,9 @@ void beginWebServer()
 
     page += "</head><body><div class='container'>";
     page += "<h2>Device Configuration</h2>";
+    page += "<p style='text-align:center;margin:-8px 0 16px;font-size:13px;color:#666;'>Firmware ";
+    page += FW_VERSION;
+    page += " &middot; <a href='https://github.com/bultza/DIY-Weather-Clock-Firmware' target='_blank'>Project page</a></p>";
     page += "<form id='cfgform' method='POST' action='/'>";
 
     // WiFi SSID field
@@ -800,14 +855,54 @@ void beginWebServer()
 
     // Submit button
     page += "<button class='btn' type='submit'>Save</button>";
-    page += "</form></div></body></html>";
+    page += "</form>";
+    // Link to the serial log dump page (navigates via GET, not a form submit)
+    page += "<a href='/log' style='text-decoration:none;'>";
+    page += "<button type='button' class='btn' style='background:#607d8b;'>View serial log</button></a>";
+    page += "<a href='/forceweather' style='text-decoration:none;'>";
+    page += "<button type='button' class='btn' style='background:#ff9800;'>Force weather fetch</button></a>";
+    page += "</div></body></html>";
 
     server.send(200, "text/html", page);
   });
 
   server.on("/", HTTP_POST, handleConfigForm);
+  server.on("/log", HTTP_GET, handleLog);
+  server.on("/forceweather", HTTP_GET, handleForceWeather);
   server.begin();
-  Serial.println(F("HTTP server started."));
+  Log.println(F("HTTP server started."));
+}
+
+// Dumps the in-RAM serial log buffer as plain text, oldest byte first.
+void handleLog()
+{
+  String out;
+  out.reserve(LOG_BUF_SIZE + 80);
+  if (logWrapped)
+  {
+    // Buffer has overflowed: warn that we only keep the most recent bytes, and
+    // start the (partial) oldest line with "..." since it was cut mid-stream.
+    out += "buffer completed, showing only the last ";
+    out += String(LOG_BUF_SIZE);
+    out += " stored bytes\n...";
+    // After wrapping, the oldest bytes run from logPos to the end of the buffer.
+    for (size_t i = logPos; i < LOG_BUF_SIZE; i++) out += logBuf[i];
+  }
+  for (size_t i = 0; i < logPos; i++) out += logBuf[i];
+  server.send(200, "text/plain; charset=utf-8", out);
+}
+
+// Forces an immediate weather fetch from the web portal (handy for debugging).
+void handleForceWeather()
+{
+  Log.println(F("Force weather fetch requested from web."));
+  weather_valid = getWeather();
+  lastWeatherFetch = millis();
+  String page = "<html><head><meta charset='UTF-8'></head><body>";
+  page += "<h3>Weather fetch ";
+  page += (weather_valid ? "OK" : "failed");
+  page += "</h3><p><a href='/'>Back to configuration</a></p></body></html>";
+  server.send(200, "text/html", page);
 }
 
 void handleConfigForm()
@@ -842,22 +937,22 @@ void handleConfigForm()
   String sunSetStr        = server.arg("sunSet");          // seconds of day
   String dawnDuskStr      = server.arg("dawnDusk");        // minutes
 
-  Serial.println(F("Received configuration:"));
-  Serial.print(F("SSID: ")); Serial.println(ssid);
-  Serial.print(F("Password: ")); Serial.println(pass);
-  Serial.print(F("City: ")); Serial.println(newCity);
-  Serial.print(F("Timezone select: ")); Serial.println(tzSelect);
-  Serial.print(F("Timezone manual: ")); Serial.println(tzManual);
-  Serial.print(F("Show seconds: ")); Serial.println(showSeconds ? "true" : "false");
-  Serial.print(F("Units: ")); Serial.println(units);
+  Log.println(F("Received configuration:"));
+  Log.print(F("SSID: ")); Log.println(ssid);
+  Log.print(F("Password: ")); Log.println(pass);
+  Log.print(F("City: ")); Log.println(newCity);
+  Log.print(F("Timezone select: ")); Log.println(tzSelect);
+  Log.print(F("Timezone manual: ")); Log.println(tzManual);
+  Log.print(F("Show seconds: ")); Log.println(showSeconds ? "true" : "false");
+  Log.print(F("Units: ")); Log.println(units);
 
-  Serial.print(F("Variable contrast: ")); Serial.println(variableContrast ? "true" : "false");
-  Serial.print(F("Contrast follows sun: ")); Serial.println(contrastFollowSun ? "true" : "false");
-  Serial.print(F("Day contrast: ")); Serial.println(dayContrastStr);
-  Serial.print(F("Night contrast: ")); Serial.println(nightContrastStr);
-  Serial.print(F("Sunrise (s): ")); Serial.println(sunRiseStr);
-  Serial.print(F("Sunset (s): ")); Serial.println(sunSetStr);
-  Serial.print(F("Dawn/Dusk (min): ")); Serial.println(dawnDuskStr);
+  Log.print(F("Variable contrast: ")); Log.println(variableContrast ? "true" : "false");
+  Log.print(F("Contrast follows sun: ")); Log.println(contrastFollowSun ? "true" : "false");
+  Log.print(F("Day contrast: ")); Log.println(dayContrastStr);
+  Log.print(F("Night contrast: ")); Log.println(nightContrastStr);
+  Log.print(F("Sunrise (s): ")); Log.println(sunRiseStr);
+  Log.print(F("Sunset (s): ")); Log.println(sunSetStr);
+  Log.print(F("Dawn/Dusk (min): ")); Log.println(dawnDuskStr);
 
   // Basic validation
   if (ssid.length() == 0 || newCity.length() == 0 || tzSelect.length() == 0)
@@ -1060,7 +1155,7 @@ void loadSettings()
     config_time12h      = false;
     config_dateUS       = false;
 
-    Serial.println(F("EEPROM signature invalid or mismatched. Using defaults."));
+    Log.println(F("EEPROM signature invalid or mismatched. Using defaults."));
     return;
   }
 
@@ -1114,23 +1209,23 @@ void loadSettings()
   // Dawn/dusk duration: avoid crazy values (0..240 minutes as a reasonable cap)
   if (config_dawnDuskDuration > 240) config_dawnDuskDuration = 30;
 
-  Serial.println(F("Configuration loaded from EEPROM."));
-  Serial.print(F("SSID: ")); Serial.println(config_wifiSSID);
-  Serial.print(F("Password: ")); Serial.println(config_wifiPass);
-  Serial.print(F("City: ")); Serial.println(config_city);
-  Serial.print(F("Timezone select: ")); Serial.println(config_timezone);
-  Serial.print(F("Timezone manual: ")); Serial.println(config_timezone_manual ? "true" : "false");
-  Serial.print(F("Show seconds: ")); Serial.println(config_showSeconds ? "true" : "false");
-  Serial.print(F("Units imperial: ")); Serial.println(config_imperial ? "true" : "false");
+  Log.println(F("Configuration loaded from EEPROM."));
+  Log.print(F("SSID: ")); Log.println(config_wifiSSID);
+  Log.print(F("Password: ")); Log.println(config_wifiPass);
+  Log.print(F("City: ")); Log.println(config_city);
+  Log.print(F("Timezone select: ")); Log.println(config_timezone);
+  Log.print(F("Timezone manual: ")); Log.println(config_timezone_manual ? "true" : "false");
+  Log.print(F("Show seconds: ")); Log.println(config_showSeconds ? "true" : "false");
+  Log.print(F("Units imperial: ")); Log.println(config_imperial ? "true" : "false");
 
   // NEW debug prints
-  Serial.print(F("Variable contrast: ")); Serial.println(config_variableContrast ? "true" : "false");
-  Serial.print(F("Contrast to follow Sun: ")); Serial.println(config_contrastFollowSun ? "true" : "false");
-  Serial.print(F("Day contrast: ")); Serial.println(config_dayContrast);
-  Serial.print(F("Night contrast: ")); Serial.println(config_nightContrast);
-  Serial.print(F("Dawn/Dusk duration (min): ")); Serial.println(config_dawnDuskDuration);
-  Serial.print(F("Sunrise (s): ")); Serial.println(config_sunRise);
-  Serial.print(F("Sunset (s): ")); Serial.println(config_sunSet);
+  Log.print(F("Variable contrast: ")); Log.println(config_variableContrast ? "true" : "false");
+  Log.print(F("Contrast to follow Sun: ")); Log.println(config_contrastFollowSun ? "true" : "false");
+  Log.print(F("Day contrast: ")); Log.println(config_dayContrast);
+  Log.print(F("Night contrast: ")); Log.println(config_nightContrast);
+  Log.print(F("Dawn/Dusk duration (min): ")); Log.println(config_dawnDuskDuration);
+  Log.print(F("Sunrise (s): ")); Log.println(config_sunRise);
+  Log.print(F("Sunset (s): ")); Log.println(config_sunSet);
 }
 
 // Helper: write a length-prefixed string into EEPROM and clear leftover bytes
@@ -1222,7 +1317,7 @@ void saveSettings()
   EEPROM.write(ADDR_SIGNATURE + 3, DEVICE_SIGNATURE);
 
   EEPROM.commit();
-  Serial.println(F("Configuration saved to EEPROM."));
+  Log.println(F("Configuration saved to EEPROM."));
 }
 
 static String sanitizeWindForDisplay(const String& w)
@@ -1280,8 +1375,8 @@ uint8_t calculateDisplayBrightness()
   {
     lastBrightness_ = brightness;
     //calculateDisplayBrightness_d(true);
-    Serial.print("Calculated Brightness: ");
-    Serial.println(brightness);
+    Log.print("Calculated Brightness: ");
+    Log.println(brightness);
   }
   
   return brightness;
@@ -1337,20 +1432,20 @@ uint8_t calculateDisplayBrightness_d(bool debug)
 
   if(debug)
   {
-    Serial.print("Now: ");
-    Serial.print(nowEpoch);
+    Log.print("Now: ");
+    Log.print(nowEpoch);
   
-    Serial.print(" - localSundawnSec: ");
-    Serial.print(localSundawnSec);
+    Log.print(" - localSundawnSec: ");
+    Log.print(localSundawnSec);
 
-    Serial.print(" - localSunriseSec: ");
-    Serial.print(localSunriseSec);
+    Log.print(" - localSunriseSec: ");
+    Log.print(localSunriseSec);
 
-    Serial.print(" - localSunsetSec: ");
-    Serial.print(localSunsetSec);    
+    Log.print(" - localSunsetSec: ");
+    Log.print(localSunsetSec);    
     
-    Serial.print(" - localSunduskSec: ");
-    Serial.println(localSunduskSec);
+    Log.print(" - localSunduskSec: ");
+    Log.println(localSunduskSec);
   }
 
   //If night or day, return config_nightContrast or config_dayContrast
@@ -1735,22 +1830,22 @@ bool getWeatherExpired()
 
   if(weather_lastSuccessfulUpdate == 0)
   {
-    Serial.println("Fetching weather data failed and we never got a valid data :(. Expired!");
+    Log.println("Fetching weather data failed and we never got a valid data :(. Expired!");
     return false; // We never got a valid weather :(
   }
 
   if(weather_lastSuccessfulUpdate + 5400000UL > now)
   {
-    Serial.println("Fetching weather data failed but previous stored data did not expired. So we keep the data :-D");
-    Serial.print(F("Temp=")); Serial.println(weather_temp);
-    Serial.print(F("Cond=")); Serial.println(weather_cond);
-    Serial.print(F("Hum=")); Serial.println(weather_hum);
-    Serial.print(F("Wind=")); Serial.println(weather_wind);
-    Serial.print(F("Pressure=")); Serial.println(weather_press);
+    Log.println("Fetching weather data failed but previous stored data did not expired. So we keep the data :-D");
+    Log.print(F("Temp=")); Log.println(weather_temp);
+    Log.print(F("Cond=")); Log.println(weather_cond);
+    Log.print(F("Hum=")); Log.println(weather_hum);
+    Log.print(F("Wind=")); Log.println(weather_wind);
+    Log.print(F("Pressure=")); Log.println(weather_press);
     return true;  // Last update was < 90 minutes ago, so it is still valid.
   }
 
-  Serial.println("Weather data expired! :((((");
+  Log.println("Weather data expired! :((((");
   return false;
 }
 
@@ -1759,7 +1854,7 @@ uint32_t getWeatherCounter = 0;
 bool getWeather() 
 {
   if (WiFi.status() != WL_CONNECTED) {
-    Serial.println(F("WiFi not connected, cannot get weather."));
+    Log.println(F("WiFi not connected, cannot get weather."));
     return getWeatherExpired();
   }
 
@@ -1793,37 +1888,37 @@ bool getWeather()
   }
   String url = "/" + cityEnc + query;
 
-  Serial.print(F("Connecting to weather server '"));
-  Serial.print(host);
-  Serial.print(F("', with URL: '"));
-  Serial.print(url);
-  Serial.println(F("'"));
+  Log.print(F("Connecting to weather server '"));
+  Log.print(host);
+  Log.print(F("', with URL: '"));
+  Log.print(url);
+  Log.println(F("'"));
 
   client.setTimeout(10000);          // read timeout (ms)
   //client.setHandshakeTimeout(15);    // TLS handshake (s)
 
   // ---- DIAGNOSTICS (only logging, no behaviour change) ----
-  Serial.print(F("[DIAG] Free heap before connect: "));
-  Serial.println(ESP.getFreeHeap());
+  Log.print(F("[DIAG] Free heap before connect: "));
+  Log.println(ESP.getFreeHeap());
   IPAddress diagIP;
   if (WiFi.hostByName(host, diagIP))
   {
-    Serial.print(F("[DIAG] DNS "));
-    Serial.print(host);
-    Serial.print(F(" -> "));
-    Serial.println(diagIP.toString());
+    Log.print(F("[DIAG] DNS "));
+    Log.print(host);
+    Log.print(F(" -> "));
+    Log.println(diagIP.toString());
   }
   else
   {
-    Serial.println(F("[DIAG] DNS resolution FAILED"));
+    Log.println(F("[DIAG] DNS resolution FAILED"));
   }
   // ---------------------------------------------------------
 
   if (!client.connect(host, 80))
   {
-    Serial.println(F("Connection failed."));
-    Serial.print(F("[DIAG] Free heap after fail: "));
-    Serial.println(ESP.getFreeHeap());
+    Log.println(F("Connection failed."));
+    Log.print(F("[DIAG] Free heap after fail: "));
+    Log.println(ESP.getFreeHeap());
     return getWeatherExpired();
   }
 
@@ -1832,22 +1927,27 @@ bool getWeather()
                "Host: " + host + "\r\n" +
                "User-Agent: ESP8266\r\n" +
                "Connection: close\r\n\r\n");
- // Read full response as raw text
+ // Read full response as raw text.
+  // Keep going while there is data available OR the socket is still open. wttr.in
+  // sends a tiny body and closes almost immediately (Connection: close), so gating
+  // only on client.connected() races with the close and drops the already-buffered
+  // bytes -> empty response. Checking available() drains them even after close.
   String response = "";
   unsigned long timeout = millis() + 15000;
-  while (millis() < timeout && client.connected()) 
+  while (millis() < timeout && (client.connected() || client.available()))
   {
-    while (client.available()) 
+    while (client.available())
     {
       char c = client.read();
       response += c;
     }
+    delay(1);  // yield to the WiFi/TCP stack so pending bytes can arrive
   }
   client.stop();
 
-  Serial.println(F("---- RAW RESPONSE ----"));
-  Serial.println(response);
-  Serial.println(F("----------------------"));
+  Log.println(F("---- RAW RESPONSE ----"));
+  Log.println(response);
+  Log.println(F("----------------------"));
 
   // --- Extract line with weather data ---
   String result = "";
@@ -1859,9 +1959,9 @@ bool getWeather()
     line.replace("\r", "");
     line.trim();
 
-    Serial.print("DEBUG LINE: >");
-    Serial.print(line);
-    Serial.println("<");
+    Log.print("DEBUG LINE: >");
+    Log.print(line);
+    Log.println("<");
 
     if (line.indexOf('|') != -1) {
       result = line;
@@ -1876,19 +1976,19 @@ bool getWeather()
     String line = response.substring(from);
     line.replace("\r", "");
     line.trim();
-    Serial.print("FALLBACK LINE: >");
-    Serial.print(line);
-    Serial.println("<");
+    Log.print("FALLBACK LINE: >");
+    Log.print(line);
+    Log.println("<");
     if (line.indexOf('|') != -1) {
       result = line;
     }
   }
 
-  Serial.print(F("Weather raw response: "));
-  Serial.println(result);
+  Log.print(F("Weather raw response: "));
+  Log.println(result);
 
   if (result.length() == 0) {
-    Serial.println(F("No weather data found."));
+    Log.println(F("No weather data found."));
     return getWeatherExpired();
   }
 
@@ -1941,12 +2041,12 @@ bool getWeather()
     pressStr = "N/A";
   } 
 
-  Serial.println(F("Parsed weather data:"));
-  Serial.print(F("Temp=")); Serial.println(tempStr);
-  Serial.print(F("Cond=")); Serial.println(condStr);
-  Serial.print(F("Hum=")); Serial.println(humStr);
-  Serial.print(F("Wind=")); Serial.println(windStr);
-  Serial.print(F("Pressure=")); Serial.println(pressStr);
+  Log.println(F("Parsed weather data:"));
+  Log.print(F("Temp=")); Log.println(tempStr);
+  Log.print(F("Cond=")); Log.println(condStr);
+  Log.print(F("Hum=")); Log.println(humStr);
+  Log.print(F("Wind=")); Log.println(windStr);
+  Log.print(F("Pressure=")); Log.println(pressStr);
 
   // Validate critical fields
   if (tempStr == "" || condStr == "") 
@@ -1964,10 +2064,10 @@ bool getWeather()
 
   if(sunDataAvailable)
   {
-    Serial.print(F("Sun dawn=")); Serial.println(sunDawnStr);
-    Serial.print(F("Sunrise=")); Serial.println(sunRiseStr);
-    Serial.print(F("Sunset=")); Serial.println(sunSetStr);
-    Serial.print(F("Sun dusk=")); Serial.println(sunDuskStr);
+    Log.print(F("Sun dawn=")); Log.println(sunDawnStr);
+    Log.print(F("Sunrise=")); Log.println(sunRiseStr);
+    Log.print(F("Sunset=")); Log.println(sunSetStr);
+    Log.print(F("Sun dusk=")); Log.println(sunDuskStr);
     weather_sundawn = sunDawnStr;
     weather_sunrise = sunRiseStr;
     weather_sunset  = sunSetStr;
