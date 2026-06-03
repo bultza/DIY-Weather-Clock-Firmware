@@ -78,6 +78,8 @@ automatically without rebooting.
 - Optional seconds display
 - Support for cities with spaces and special characters
 - Weather hidden when not available
+- Weather condition icon on the weather screen, with day/night variants (can be turned off)
+- More display options: 12/24-hour time, DD/MM/YYYY or MM/DD/YYYY date, hide the '+' on positive temperatures
 - Configuration web portal always reachable on the network (reconfigure anytime)
 - Serial log viewable from a web page (remote debugging without a cable)
 - Over-the-air (OTA) firmware updates from a web page (no cable after the first flash)
@@ -138,7 +140,7 @@ Software:
 
 ## Updating over the air (OTA)
 
-After the firmware is running, you no longer need the USB/FTDI cable to update it:
+You can use OTA only if you managed to update the firmware beforehand already. You cannot do OTA over the original firmware. So, after the firmware is running, you will no longer need the USB/FTDI cable to update it to future versions:
 
 1. Build the new firmware and locate the binary:
    - Arduino IDE: **Sketch -> Export Compiled Binary**, then grab
@@ -150,16 +152,13 @@ After the firmware is running, you no longer need the USB/FTDI cable to update i
 3. Upload the `.bin`. The clock flashes it and reboots into the new version. Your
    saved configuration in EEPROM is preserved.
 
-> :warning: The OTA upload page has no password. Anyone on the same network can
-> push firmware to the clock. This is fine for a trusted home LAN; do not expose
-> the device to untrusted networks.
-
 > :warning: The very first flash must still be done over the USB/FTDI cable — the
 > factory firmware does not have the OTA update page.
 
 ## Resources
 - Original firmware and inspiration: https://www.whynot.org.ua/en/electronic-kits/hu-061-diy-kit-wi-fi-weather-forecast-clock
 - Huge thanks to wttr.in for providing free weather data: https://github.com/chubin/wttr.in
+- Weather icons by Dhole (pixel weather icons, CC BY-SA 4.0): https://github.com/Dhole/weather-pixel-icons
 - In your source website for DIY projects just search for "ESP8266 DIY" or "weather clock diy" to find the hardware, usually for less than 10€
 
 Simple clock, honest code.
