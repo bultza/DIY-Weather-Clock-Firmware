@@ -52,6 +52,14 @@ Once configured and rebooted:
 - Time is synchronized using NTP pool servers
 - Timezone handling uses proper DST rules (not fixed offsets)
 - Weather data is retrieved from wttr.in every 15 minutes
+- The configuration web portal stays available at the device's IP (shown on the
+  OLED at boot), so you can reconfigure it from a browser at any time — no need
+  to force AP mode or re-flash
+- The device's serial log is kept in a small RAM buffer and can be viewed from a
+  web page, so you can debug the clock over Wi-Fi without a serial cable
+- Firmware can be updated over the air (OTA): once it is running, you can upload a
+  new `.bin` from a browser at `http://<device-ip>/update`, so you only need the
+  USB/FTDI cable for the very first flash
 
 Every 15 seconds the display toggles between:
 - Clock view
@@ -70,6 +78,11 @@ automatically without rebooting.
 - Optional seconds display
 - Support for cities with spaces and special characters
 - Weather hidden when not available
+- Weather condition icon on the weather screen, with day/night variants (can be turned off)
+- More display options: 12/24-hour time, DD/MM/YYYY or MM/DD/YYYY date, hide the '+' on positive temperatures
+- Configuration web portal always reachable on the network (reconfigure anytime)
+- Serial log viewable from a web page (remote debugging without a cable)
+- Over-the-air (OTA) firmware updates from a web page (no cable after the first flash)
 - More predictable behavior
 
 
@@ -113,12 +126,62 @@ Software:
   - Adafruit SSD1306 (by Adafruit)
   - Adafruit GFX Library (by Adafruit)
   - Any dependencies pulled by those libraries
+- Before compiling, set the flash layout so OTA updates fit (see warning below):
+  - Tools -> Flash Size -> **"1MB (FS:none OTA:~502KB)"**
 - Compile and upload the firmware
 
+> :warning: You MUST select **Flash Size = "1MB (FS:none OTA:~502KB)"** in the
+> Tools menu. This firmware uses no filesystem, so this layout reclaims that space
+> for the program and leaves ~500KB free for the new image during an OTA update.
+> Any other 1MB layout (the default reserves 256KB for a filesystem) leaves almost
+> no room for OTA and the `/update` page will reject the new firmware. If you build
+> with PlatformIO instead, this is already handled by `platformio.ini`
+> (`board_build.ldscript = eagle.flash.1m.ld`).
+
+### Building with PlatformIO (VS Code)
+
+If you prefer VS Code, the repo ships a `platformio.ini`, so you don't need the
+Arduino IDE, and the flash layout for OTA is already set for you:
+
+1. Install [VS Code](https://code.visualstudio.com/) and the **PlatformIO IDE** extension.
+2. Open this repository folder in VS Code — PlatformIO picks up `platformio.ini`
+   automatically and downloads the toolchain and libraries (Adafruit SSD1306 + GFX)
+   on the first build.
+3. Build / flash / monitor from the PlatformIO toolbar, or from a terminal:
+   - Build: `pio run`
+   - Flash over USB/FTDI (first time only, ESP in flash mode): `pio run -t upload`
+   - Serial monitor: `pio device monitor` (115200)
+
+The target board is `esp01_1m` (ESP-01S, 1 MB flash). After the first USB flash you
+can update over Wi-Fi from the `/update` page (see below).
+
+## Updating over the air (OTA)
+
+You can use OTA only if you managed to update the firmware beforehand already. You cannot do OTA over the original firmware. So, after the firmware is running, you will no longer need the USB/FTDI cable to update it to future versions:
+
+1. Build the new firmware and locate the binary:
+   - Arduino IDE: **Sketch -> Export Compiled Binary**, then grab
+     `DIY-Weather-Clock-Firmware.ino.bin`
+   - PlatformIO: `.pio/build/esp01_1m/firmware.bin`
+2. Open `http://<device-ip>/update` in a browser (the device IP is shown on the
+   OLED at boot, and there is also an "Update firmware (OTA)" button on the
+   configuration page).
+3. Upload the `.bin`. The clock flashes it and reboots into the new version. Your
+   saved configuration in EEPROM is preserved.
+
+> :warning: The very first flash must still be done over the USB/FTDI cable — the
+> factory firmware does not have the OTA update page.
+
+## Tools
+
+The [`tools/icon_sim/`](tools/icon_sim/README.md) folder has a small Python tool to
+preview the weather icons and regenerate `weather_icons.h` — it is not part of the
+firmware build.
 
 ## Resources
 - Original firmware and inspiration: https://www.whynot.org.ua/en/electronic-kits/hu-061-diy-kit-wi-fi-weather-forecast-clock
 - Huge thanks to wttr.in for providing free weather data: https://github.com/chubin/wttr.in
+- Weather icons by Dhole (pixel weather icons, CC BY-SA 4.0): https://github.com/Dhole/weather-pixel-icons
 - In your source website for DIY projects just search for "ESP8266 DIY" or "weather clock diy" to find the hardware, usually for less than 10€
 
 Simple clock, honest code.

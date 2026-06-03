@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+*.png
+*.xbm
+_src*/
+_preview/
