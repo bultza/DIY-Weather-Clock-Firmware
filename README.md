@@ -138,6 +138,23 @@ Software:
 > with PlatformIO instead, this is already handled by `platformio.ini`
 > (`board_build.ldscript = eagle.flash.1m.ld`).
 
+### Building with PlatformIO (VS Code)
+
+If you prefer VS Code, the repo ships a `platformio.ini`, so you don't need the
+Arduino IDE, and the flash layout for OTA is already set for you:
+
+1. Install [VS Code](https://code.visualstudio.com/) and the **PlatformIO IDE** extension.
+2. Open this repository folder in VS Code — PlatformIO picks up `platformio.ini`
+   automatically and downloads the toolchain and libraries (Adafruit SSD1306 + GFX)
+   on the first build.
+3. Build / flash / monitor from the PlatformIO toolbar, or from a terminal:
+   - Build: `pio run`
+   - Flash over USB/FTDI (first time only, ESP in flash mode): `pio run -t upload`
+   - Serial monitor: `pio device monitor` (115200)
+
+The target board is `esp01_1m` (ESP-01S, 1 MB flash). After the first USB flash you
+can update over Wi-Fi from the `/update` page (see below).
+
 ## Updating over the air (OTA)
 
 You can use OTA only if you managed to update the firmware beforehand already. You cannot do OTA over the original firmware. So, after the firmware is running, you will no longer need the USB/FTDI cable to update it to future versions:
@@ -154,6 +171,12 @@ You can use OTA only if you managed to update the firmware beforehand already. Y
 
 > :warning: The very first flash must still be done over the USB/FTDI cable — the
 > factory firmware does not have the OTA update page.
+
+## Tools
+
+The [`tools/icon_sim/`](tools/icon_sim/README.md) folder has a small Python tool to
+preview the weather icons and regenerate `weather_icons.h` — it is not part of the
+firmware build.
 
 ## Resources
 - Original firmware and inspiration: https://www.whynot.org.ua/en/electronic-kits/hu-061-diy-kit-wi-fi-weather-forecast-clock
