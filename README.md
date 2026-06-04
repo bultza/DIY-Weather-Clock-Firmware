@@ -12,6 +12,11 @@ or AliExpress. The kit includes a plexiglass structure and three PCB boards:
 <br/>Clock Face on the left, Weather face on the right
 </div>
 
+<div align="center">
+<img src="tools/screen_sim/screens.png" alt="Different possible Weather faces samples" width="80%"/>
+<br/>Different Faces examples showing different possible customizations
+</div>
+
 ## Why
 This kit already ships with a ready-to-use firmware, but it requires registering
 on an external website and you have no real control over what the firmware does
@@ -36,11 +41,12 @@ If the signature is not found:
 - The OLED display shows connection instructions
 - You connect to the AP and open the configuration web portal
 - You configure:
-  - Wi-Fi credentials
+  - Wi-Fi credentials (a **Scan** button lists nearby networks so you don't have to type the SSID)
   - City (used for weather)
   - Timezone (preset or manual)
   - Metric / imperial units
   - Seconds display
+  - Optionally, a **Netatmo** weather station (see the Netatmo section below)
 
 <div align="center">
 <img src="docs/ESP8266_web_config.png" alt="Screenshot of the configuration website" width="50%"/>
@@ -52,6 +58,9 @@ Once configured and rebooted:
 - Time is synchronized using NTP pool servers
 - Timezone handling uses proper DST rules (not fixed offsets)
 - Weather data is retrieved from wttr.in every 15 minutes
+- If Netatmo is enabled, the outdoor temperature/humidity and pressure are taken
+  from your own station instead (the condition, icon and sun times still come
+  from wttr.in)
 - The configuration web portal stays available at the device's IP (shown on the
   OLED at boot), so you can reconfigure it from a browser at any time — no need
   to force AP mode or re-flash
@@ -81,9 +90,64 @@ automatically without rebooting.
 - Weather condition icon on the weather screen, with day/night variants (can be turned off)
 - More display options: 12/24-hour time, DD/MM/YYYY or MM/DD/YYYY date, hide the '+' on positive temperatures
 - Configuration web portal always reachable on the network (reconfigure anytime)
+- Wi-Fi network scanner in the config portal (pick your SSID from a list)
+- Optional **Netatmo** integration: show outdoor temperature/humidity and pressure
+  from your own weather station
+- Status icons on the clock screen: a Wi-Fi signal meter and a Netatmo health mark
 - Serial log viewable from a web page (remote debugging without a cable)
 - Over-the-air (OTA) firmware updates from a web page (no cable after the first flash)
 - More predictable behavior
+
+
+## Netatmo (optional): use your own weather station
+
+By default the clock gets all its weather from [wttr.in](https://wttr.in). If you
+own a [Netatmo](https://www.netatmo.com/) Weather Station you can have the clock
+show **your own measurements** instead: outdoor **temperature** and **humidity**
+(from the outdoor module) and **pressure** (from the indoor base station). The
+weather **condition**, the **icon** and the **sunrise/sunset** times still come
+from wttr.in — Netatmo doesn't provide those — so the two work together.
+
+If Netatmo is unreachable, the clock automatically falls back to the wttr.in
+values, and the clock screen shows a small `!` next to the Wi-Fi meter (it shows
+a Netatmo "OK" mark when the last update succeeded).
+
+### One-time setup at Netatmo
+
+Netatmo requires an OAuth2 app and a token. You create these once on Netatmo's
+developer site:
+
+1. Sign in at **https://dev.netatmo.com** with your normal Netatmo account.
+2. Go to **My Apps** and create an app (any name/description). Open it and note
+   its **Client ID** and **Client secret**.
+3. On the same app page, use the **Token generator**: tick the **`read_station`**
+   scope and generate a token. Copy the **refresh token** it gives you.
+   (The clock only needs the refresh token; it mints short-lived access tokens
+   from it automatically, and refreshes them every ~3 hours on its own.)
+
+> :warning: Treat the Client secret and refresh token like passwords — don't
+> share or commit them. If you ever leak them, regenerate the token / app.
+
+### Configure the clock
+
+Open the config portal (the AP `Clock-ESP01-Setup` on first setup, or the
+device's IP afterwards) and:
+
+1. Tick **"Use Netatmo station"**.
+2. **Station/module name**: the name of your **outdoor module** as it appears in
+   the Netatmo app (e.g. `Terraza`, `Outdoor`, `Jardin`). Use an ASCII name
+   (accents like `Salón` aren't matched). Leave blank to use the first station.
+3. Paste the **Client ID**, **Client secret** and **Refresh token**.
+4. Save. The clock reboots and starts overlaying your station's readings.
+
+Notes:
+- **Units:** Netatmo returns values in your Netatmo account's unit setting, used
+  as-is. Set your Netatmo account to the same units (°C / °F, mbar) as the clock.
+- For security the three credentials are **never shown back** in the portal:
+  leave a field blank to keep the stored value, or type a new value to replace
+  it (the Wi-Fi password works the same way).
+- The refresh token is rotated by Netatmo on every refresh; the clock saves the
+  new one automatically, so you don't need to touch it again.
 
 
 ## What you need to compile and install
