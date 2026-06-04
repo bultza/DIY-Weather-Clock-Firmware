@@ -12,6 +12,11 @@ or AliExpress. The kit includes a plexiglass structure and three PCB boards:
 <br/>Clock Face on the left, Weather face on the right
 </div>
 
+<div align="center">
+<img src="tools/screen_sim/screens.png" alt="Different possible Weather faces samples" width="80%"/>
+<br/>Different Faces examples showing different possible customizations
+</div>
+
 ## Why
 This kit already ships with a ready-to-use firmware, but it requires registering
 on an external website and you have no real control over what the firmware does
