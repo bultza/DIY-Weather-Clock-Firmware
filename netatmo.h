@@ -2,25 +2,30 @@
 // =====================================================================
 // Netatmo Weather API client for the DIY Weather Clock.
 //
-// Self-contained driver: depends only on the ESP8266 WiFi/HTTP stack,
-// BearSSL and ArduinoJson. It talks to api.netatmo.com over HTTPS
-// (TLS 1.2 with MFLN 512-byte buffers — verified to fit the ESP-01S's
-// ~30 KB free heap). See docs/netatmo_integration.md for the design.
+// Self-contained driver: depends only on the ESP8266 WiFi/HTTP stack and
+// BearSSL. It talks to api.netatmo.com over HTTPS (TLS 1.2 with MFLN
+// 512-byte buffers — verified to fit the ESP-01S's ~30 KB free heap).
+// See docs/netatmo_integration.md for the design.
 //
 // Netatmo only provides *measured* values, so this fills temperature +
 // humidity (from the outdoor NAModule1) and pressure (from its parent
 // NAMain). The condition string, icon code and sun times still come from
 // wttr.in — the caller overlays these readings on top of the wttr result.
 //
+// JSON parsing is done by hand (targeted string scans) rather than with a
+// library: the Netatmo responses are stable and the firmware lives right at
+// the 1 MB OTA size ceiling, so we cannot afford ArduinoJson's flash cost.
+// Because we force HTTP/1.0 (useHTTP10), the body is un-chunked and small
+// (~4 KB), so getString() returns it cleanly for scanning.
+//
 // API surface:
 //   netatmoRefresh(...)  -> POST /oauth2/token  (refresh-token grant)
-//   netatmoFetch(...)    -> GET  /api/getstationsdata + parse + select
+//   netatmoFetch(...)    -> GET  /api/getstationsdata + scan + select
 // Both take a Print& for logging (the firmware passes its RingLog `Log`).
 // =====================================================================
 #include <ESP8266WiFi.h>
 #include <WiFiClientSecureBearSSL.h>
 #include <ESP8266HTTPClient.h>
-#include <ArduinoJson.h>
 
 struct NetatmoReadings
 {
@@ -68,6 +73,42 @@ static String netatmoUrlEncode(const String &s)
   return o;
 }
 
+// --- tiny JSON value extractors -------------------------------------------
+// These are NOT a general JSON parser; they exploit the flat, stable shape of
+// Netatmo's responses. The leading quote in the key pattern ("Pressure":)
+// disambiguates against substrings like "AbsolutePressure":, and the trailing
+// ':' avoids matching array entries such as data_type:["Temperature",...].
+
+// String value of  "key":"value"  searched from `from`. "" if not found.
+static String njsonStr(const String &s, const char *key, int from = 0)
+{
+  String pat = String('"') + key + "\":\"";
+  int p = s.indexOf(pat, from);
+  if (p < 0) return "";
+  p += pat.length();
+  int e = s.indexOf('"', p);
+  if (e < 0) return "";
+  return s.substring(p, e);
+}
+
+// Numeric value (int or float, as text) of  "key":<number>  searched from `from`.
+static String njsonNum(const String &s, const char *key, int from = 0)
+{
+  String pat = String('"') + key + "\":";
+  int p = s.indexOf(pat, from);
+  if (p < 0) return "";
+  p += pat.length();
+  while (p < (int)s.length() && s[p] == ' ') p++;
+  int e = p;
+  while (e < (int)s.length())
+  {
+    char c = s[e];
+    if ((c >= '0' && c <= '9') || c == '-' || c == '+' || c == '.') e++;
+    else break;
+  }
+  return s.substring(p, e);
+}
+
 // POST /oauth2/token with the refresh-token grant. On success fills accessToken,
 // newRefresh (Netatmo ROTATES it — caller MUST persist) and expiresInSec.
 static bool netatmoRefresh(const String &clientId, const String &clientSecret,
@@ -76,7 +117,7 @@ static bool netatmoRefresh(const String &clientId, const String &clientSecret,
 {
   BearSSL::WiFiClientSecure client; netatmoConfigTLS(client, log);
   HTTPClient http; http.setReuse(false);
-  http.useHTTP10(true);   // force HTTP/1.0 => no chunked encoding => clean stream read
+  http.useHTTP10(true);   // force HTTP/1.0 => no chunked encoding => clean read
   if (!http.begin(client, F("https://api.netatmo.com/oauth2/token")))
   {
     log.println(F("[netatmo] token begin() failed"));
@@ -98,26 +139,33 @@ static bool netatmoRefresh(const String &clientId, const String &clientSecret,
     return false;
   }
 
-  StaticJsonDocument<384> doc;   // token response is small (access/refresh/expiry)
-  DeserializationError err = deserializeJson(doc, http.getStream());
+  String payload = http.getString();   // small (~300 B), un-chunked
   http.end();
-  if (err) { log.print(F("[netatmo] token JSON err: ")); log.println(err.c_str()); return false; }
 
-  accessToken  = (const char *)(doc["access_token"]  | "");
-  newRefresh   = (const char *)(doc["refresh_token"] | "");
-  expiresInSec = doc["expires_in"] | 0;
-  return accessToken.length() > 0;
+  accessToken  = njsonStr(payload, "access_token");
+  newRefresh   = njsonStr(payload, "refresh_token");
+  expiresInSec = (uint32_t)njsonNum(payload, "expires_in").toInt();
+  if (accessToken.length() == 0)
+  {
+    log.println(F("[netatmo] token response missing access_token"));
+    return false;
+  }
+  return true;
 }
 
-// GET /api/getstationsdata, de-chunk, parse (filtered) and select the outdoor
-// module by name. `wantName` matches a NAModule1 module_name OR a station name
-// (case-insensitive); empty => first non-read_only station's first NAModule1.
+// GET /api/getstationsdata, then hand-scan for the chosen outdoor module.
+// `wantName` matches a NAModule1 module_name (case-insensitive); empty => the
+// first NAModule1 in the response. Temperature/Humidity come from that module's
+// dashboard_data; Pressure from the nearest preceding device dashboard_data
+// (its parent NAMain). Notes vs the old ArduinoJson path: read_only filtering
+// and reachable checks are dropped for simplicity, and non-ASCII module names
+// (returned as \uXXXX escapes) won't match — use an ASCII module name.
 static bool netatmoFetch(const String &accessToken, const String &wantName,
                          NetatmoReadings &out, Print &log)
 {
   BearSSL::WiFiClientSecure client; netatmoConfigTLS(client, log);
   HTTPClient http; http.setReuse(false);
-  http.useHTTP10(true);   // force HTTP/1.0 => no chunked encoding => clean stream read
+  http.useHTTP10(true);   // force HTTP/1.0 => no chunked encoding => clean read
   if (!http.begin(client, F("https://api.netatmo.com/api/getstationsdata?get_favorites=false")))
   {
     log.println(F("[netatmo] data begin() failed"));
@@ -129,68 +177,53 @@ static bool netatmoFetch(const String &accessToken, const String &wantName,
   log.print(F("[netatmo] getstationsdata HTTP ")); log.println(code);
   if (code != 200) { http.end(); return false; }
 
-  // Filter: keep only the handful of fields we need, so the parsed document
-  // stays tiny regardless of how many stations/modules the account exposes.
-  // Deserialize straight from the (HTTP/1.0, un-chunked) stream -- no 4 KB String.
-  StaticJsonDocument<512> filter;
-  {
-    JsonObject d = filter["body"]["devices"][0].to<JsonObject>();
-    d["station_name"] = true; d["module_name"] = true; d["read_only"] = true;
-    d["dashboard_data"]["Pressure"] = true;
-    JsonObject m = d["modules"][0].to<JsonObject>();
-    m["type"] = true; m["module_name"] = true; m["reachable"] = true;
-    m["dashboard_data"]["Temperature"] = true;
-    m["dashboard_data"]["Humidity"]    = true;
-  }
-  DynamicJsonDocument doc(3072);   // filtered output is tiny; 3 KB is ample headroom
-  DeserializationError err = deserializeJson(doc, http.getStream(), DeserializationOption::Filter(filter));
+  String s = http.getString();   // un-chunked body, ~4 KB
   http.end();
-  if (err) { log.print(F("[netatmo] data JSON err: ")); log.println(err.c_str()); return false; }
+  log.print(F("[netatmo] payload bytes: ")); log.println(s.length());
 
   String want = wantName; want.trim();
-  JsonArray devices = doc["body"]["devices"];
-  if (devices.isNull()) { log.println(F("[netatmo] no devices array")); return false; }
 
-  for (JsonObject dev : devices)
+  // Find the chosen NAModule1: scan each "type":"NAModule1" and read the
+  // module_name that follows it inside the same object.
+  const char *TYPE = "\"type\":\"NAModule1\"";
+  int modPos = -1;
+  String matchedName;
+  int from = 0;
+  while (true)
   {
-    bool   readOnly = dev["read_only"] | false;
-    String devName  = (const char *)(dev["station_name"] | "");
-    String devMod   = (const char *)(dev["module_name"]  | "");
-    bool   devMatch = want.length() && (devName.equalsIgnoreCase(want) || devMod.equalsIgnoreCase(want));
-
-    for (JsonObject m : dev["modules"].as<JsonArray>())
+    int t = s.indexOf(TYPE, from);
+    if (t < 0) break;
+    String mname = njsonStr(s, "module_name", t);   // next module_name after the type
+    if (want.length() == 0 || mname.equalsIgnoreCase(want))
     {
-      if (String((const char *)(m["type"] | "")) != "NAModule1") continue;
-      String mName = (const char *)(m["module_name"] | "");
-
-      bool modMatch  = want.length() && mName.equalsIgnoreCase(want);
-      bool emptyPick = (want.length() == 0 && !readOnly);
-      if (!(modMatch || devMatch || emptyPick)) continue;
-
-      if (!(m["reachable"] | true))
-      {
-        log.print(F("[netatmo] matched module not reachable: ")); log.println(mName);
-        continue;
-      }
-
-      JsonObject dd = m["dashboard_data"];
-      if (!dd.isNull())
-      {
-        if (!dd["Temperature"].isNull()) { out.tempC = dd["Temperature"].as<float>(); out.haveTemp = true; }
-        if (!dd["Humidity"].isNull())    { out.hum   = dd["Humidity"].as<int>();       out.haveHum  = true; }
-      }
-      JsonObject pdd = dev["dashboard_data"];
-      if (!pdd.isNull() && !pdd["Pressure"].isNull())
-      {
-        out.pressure = pdd["Pressure"].as<float>(); out.havePress = true;
-      }
-      out.station = devName; out.module = mName;
-      log.print(F("[netatmo] matched station='")); log.print(devName);
-      log.print(F("' module='")); log.print(mName); log.println('\'');
-      return out.haveTemp || out.haveHum || out.havePress;
+      modPos = t; matchedName = mname; break;
     }
+    from = t + (int)strlen(TYPE);
+  }
+  if (modPos < 0) { log.println(F("[netatmo] no matching NAModule1 found")); return false; }
+
+  // Outdoor temp/humidity: first occurrences after the module's position (in
+  // its dashboard_data). data_type:["Temperature",...] has no ':' so won't match.
+  String tStr = njsonNum(s, "Temperature", modPos);
+  String hStr = njsonNum(s, "Humidity",    modPos);
+  if (tStr.length()) { out.tempC = tStr.toFloat(); out.haveTemp = true; }
+  if (hStr.length()) { out.hum   = hStr.toInt();   out.haveHum  = true; }
+
+  // Pressure: the parent device lists its dashboard_data (with Pressure) BEFORE
+  // its modules[], so take the nearest "Pressure": before the module.
+  int pPos = s.lastIndexOf("\"Pressure\":", modPos);
+  if (pPos >= 0)
+  {
+    String pStr = njsonNum(s, "Pressure", pPos);
+    if (pStr.length()) { out.pressure = pStr.toFloat(); out.havePress = true; }
   }
 
-  log.println(F("[netatmo] no matching module found"));
-  return false;
+  // Parent station name (nearest before the module), for diagnostics.
+  int snPos = s.lastIndexOf("\"station_name\":\"", modPos);
+  if (snPos >= 0) out.station = njsonStr(s, "station_name", snPos);
+  out.module = matchedName;
+
+  log.print(F("[netatmo] matched station='")); log.print(out.station);
+  log.print(F("' module='")); log.print(out.module); log.println('\'');
+  return out.haveTemp || out.haveHum || out.havePress;
 }

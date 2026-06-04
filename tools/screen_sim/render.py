@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Bit-for-bit simulation of the clock's two OLED screens (128x64, 1-bit).
 
-Mirrors drawTimeScreen() / drawWeatherScreen() in the firmware exactly, using
+Mirrors drawTimeScreen() / drawWeatherScreen() in the firmware exactly (incl. the
+clock-screen WiFi meter + Netatmo status mark from drawTopStatusIcons()), using
 the real Adafruit GFX fonts (gfx.py) and the real weather icons (../icon_sim).
 Produces a labeled PNG montage of several example states.
 
@@ -54,12 +55,44 @@ def icon_for_code(code, night):
     return icon_bytes(name, night)
 
 
+# 8x8 "Netatmo OK" glyph — identical bytes to netatmoOkIcon[] in the firmware.
+NETATMO_OK_ICON = [0x18, 0x3C, 0x7E, 0xFF, 0xFF, 0xFF, 0xC3, 0x81]
+
+
+def draw_status_icons(d, wifi_bars, netatmo):
+    """Mirror drawTopStatusIcons(): top-right WiFi meter + Netatmo mark.
+
+    wifi_bars: 0-4 (how many of the 4 ascending bars are lit).
+    netatmo:   None (disabled / nothing), "ok" (the glyph), or "error" (a '!').
+    """
+    bw, gap, base_y = 2, 1, 8
+    x0 = 128 - (4 * bw + 3 * gap)          # right-aligned = 117
+    for i in range(4):
+        if i < wifi_bars:
+            hgt = 2 * (i + 1)              # 2,4,6,8 px tall
+            x = x0 + i * (bw + gap)
+            for dx in range(bw):
+                for dy in range(hgt):
+                    d.pixel(x + dx, base_y - hgt + dy)
+
+    if netatmo:
+        nx = x0 - 10                       # 8px icon + 2px gap before the meter
+        if netatmo == "ok":
+            d.bitmap(nx, 0, NETATMO_OK_ICON, 8, 8)
+        elif netatmo == "error":
+            d.setFont(None)
+            d.setCursor(nx + 2, 0)
+            d.print("!")
+
+
 # --------------------------------------------------------------------------
 # Screen 1: the clock face  (drawTimeScreen)
 # --------------------------------------------------------------------------
 def time_screen(day_name, hh, mm, ss=None, ampm=None,
-                temp_line="N/A", date_str="04/06/2026"):
-    """ss/ampm None => not shown. temp_line is the full bottom-left string."""
+                temp_line="N/A", date_str="04/06/2026",
+                wifi_bars=4, netatmo=None):
+    """ss/ampm None => not shown. temp_line is the full bottom-left string.
+    wifi_bars (0-4) and netatmo (None/"ok"/"error") drive the top status icons."""
     d = Display()
     show_seconds = ss is not None
     show_12h = ampm is not None
@@ -115,6 +148,7 @@ def time_screen(day_name, hh, mm, ss=None, ampm=None,
     d.print(date_str)
 
     d.hline(0, 52, 128)
+    draw_status_icons(d, wifi_bars, netatmo)
     return d
 
 
@@ -229,18 +263,22 @@ def montage(items):
 
 def examples():
     out = []
-    # --- Clock faces ---
-    out.append(("Clock 24h, weather present",
+    # --- Clock faces (top-right: WiFi meter + Netatmo mark) ---
+    out.append(("Clock 24h, WiFi full + Netatmo OK",
                 time_screen("Wednesday", 14, 9,
-                            temp_line="+22" + DEG + "C 55%", date_str="04/06/2026")))
-    out.append(("Clock 12h + seconds (AM/PM)",
+                            temp_line="+22" + DEG + "C 55%", date_str="04/06/2026",
+                            wifi_bars=4, netatmo="ok")))
+    out.append(("Clock 12h + seconds, Netatmo OK",
                 time_screen("Sunday", 9, 7, ss=5, ampm="AM",
-                            temp_line="+18" + DEG + "C 60%", date_str="06/04/2026")))
-    out.append(("Clock 24h + seconds",
+                            temp_line="+18" + DEG + "C 60%", date_str="06/04/2026",
+                            wifi_bars=3, netatmo="ok")))
+    out.append(("Clock 24h + seconds, Netatmo ERROR (!)",
                 time_screen("Friday", 23, 41, ss=58,
-                            temp_line="+7" + DEG + "C 80%", date_str="12/12/2026")))
-    out.append(("Clock, no weather (N/A)",
-                time_screen("Monday", 6, 30, temp_line="N/A", date_str="01/01/2027")))
+                            temp_line="+7" + DEG + "C 80%", date_str="12/12/2026",
+                            wifi_bars=2, netatmo="error")))
+    out.append(("Clock, weak WiFi, Netatmo disabled",
+                time_screen("Monday", 6, 30, temp_line="N/A", date_str="01/01/2027",
+                            wifi_bars=1, netatmo=None)))
     # --- Weather faces (with icons) ---
     out.append(("Weather: Sunny (113, day)",
                 weather_screen("Madrid", "22", "C", "Sunny",

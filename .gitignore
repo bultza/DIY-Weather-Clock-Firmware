@@ -9,3 +9,7 @@ netatmo_sample.json
 .vscode/ipch
 build
 .vscode
+__pycache__
+# Tool-downloaded third-party assets (fetched on demand, not redistributed here)
+_fonts
+_src
