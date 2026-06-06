@@ -42,7 +42,7 @@
 #include "netatmo.h"         // Netatmo Weather API client (token refresh + getstationsdata)
 
 // Firmware version (bump this on each release)
-#define FW_VERSION "V2.0.1"
+#define FW_VERSION "V2.0.2"
 
 // Pin definitions (ESP-01):
 const uint8_t SDA_PIN = 0;           // I2C SDA connected to GPIO0
