@@ -420,6 +420,63 @@ void setup()
   }
 }
 
+// WiFi signal strength as 0-4 bars (also used by the frame signature). Quantized,
+// so it only changes when the RSSI crosses a threshold (no constant redraws).
+static int wifiBars()
+{
+  if (WiFi.status() != WL_CONNECTED) return 0;
+  long rssi = WiFi.RSSI();
+  if (rssi >= -55) return 4;
+  if (rssi >= -65) return 3;
+  if (rssi >= -72) return 2;
+  return 1;
+}
+
+// --- Frame-change detection ---------------------------------------------
+// The display loop ran a full ~1 KB I2C transfer (display.display()) every loop
+// iteration even though the visible content changes at most once per second. We
+// hash everything that affects the pixels into a 32-bit signature and only redraw
+// when it changes. Brightness is intentionally NOT in the signature: it fades very
+// slowly and the 15 s screen toggle refreshes it often enough.
+static uint32_t g_lastFrameSig = 0;
+
+static inline uint32_t fnvByte(uint32_t h, uint8_t b) { h ^= b; return h * 16777619u; }
+static uint32_t fnvStr(uint32_t h, const String &s)
+{
+  for (size_t i = 0; i < s.length(); i++) h = fnvByte(h, (uint8_t)s[i]);
+  return h;
+}
+
+static uint32_t computeFrameSig()
+{
+  time_t now = time(nullptr);                 // non-blocking (unlike getLocalTime)
+  struct tm ti; localtime_r(&now, &ti);
+
+  uint32_t h = 2166136261u;
+  h = fnvByte(h, showWeatherScreen ? 1 : 0);
+  h = fnvByte(h, (uint8_t)ti.tm_hour);
+  h = fnvByte(h, (uint8_t)ti.tm_min);
+  if (config_showSeconds && !showWeatherScreen) h = fnvByte(h, (uint8_t)ti.tm_sec);
+  h = fnvByte(h, (uint8_t)ti.tm_mday);
+  h = fnvByte(h, (uint8_t)ti.tm_wday);
+  h = fnvByte(h, (uint8_t)ti.tm_mon);
+
+  h = fnvByte(h, weather_valid ? 1 : 0);
+  h = fnvStr(h, weather_temp);
+  h = fnvStr(h, weather_cond);
+  h = fnvStr(h, weather_hum);
+  h = fnvStr(h, weather_wind);
+  h = fnvStr(h, weather_press);
+  h = fnvByte(h, (uint8_t)weather_code);
+
+  h = fnvByte(h, (uint8_t)wifiBars());
+  uint8_t nstat = config_netatmo_enabled
+                    ? (netatmoConsecFails > 0 ? 2 : (netatmoLastAttemptOk ? 1 : 3))
+                    : 0;
+  h = fnvByte(h, nstat);
+  return h;
+}
+
 void loop()
 {
   uint32_t now = millis();
@@ -493,14 +550,21 @@ void loop()
     }
   }
 
-  // Draw the appropriate screen
-  if (showWeatherScreen && weather_valid) 
+  // Draw the appropriate screen, but only when the visible content changed —
+  // otherwise we'd re-transfer the whole framebuffer over I2C tens of times a
+  // second for nothing.
+  uint32_t sig = computeFrameSig();
+  if (sig != g_lastFrameSig)
   {
-    drawWeatherScreen();
-  } 
-  else 
-  {
-    drawTimeScreen();
+    g_lastFrameSig = sig;
+    if (showWeatherScreen && weather_valid)
+    {
+      drawWeatherScreen();
+    }
+    else
+    {
+      drawTimeScreen();
+    }
   }
 
   // Small delay to yield to system
@@ -1748,15 +1812,7 @@ static const unsigned char PROGMEM netatmoOkIcon[8] =
 void drawTopStatusIcons()
 {
   // --- WiFi signal meter: 4 ascending bars, the strongest N filled ---
-  int bars = 0;
-  if (WiFi.status() == WL_CONNECTED)
-  {
-    long rssi = WiFi.RSSI();
-    if      (rssi >= -55) bars = 4;
-    else if (rssi >= -65) bars = 3;
-    else if (rssi >= -72) bars = 2;
-    else                  bars = 1;   // connected but weak
-  }
+  int bars = wifiBars();
   const int bw = 2, gap = 1, baseY = 8;
   const int x0 = 128 - (4 * bw + 3 * gap);   // right-aligned (= 117)
   for (int i = 0; i < 4; i++)
