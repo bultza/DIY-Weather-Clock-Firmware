@@ -100,20 +100,42 @@ static inline void logPush(uint8_t c)
 }
 
 // Print subclass: all print()/println() overloads come for free from Print and
-// are routed through write(), so we only mirror the bytes here.
+// are routed through write(), so we only mirror the bytes here. Every line is
+// prefixed with the local date+time (or an uptime stamp before NTP has synced)
+// so each entry in the web log is self-dated.
 class RingLog : public Print
 {
+  bool atLineStart = true;
+
+  // Emit the per-line timestamp prefix straight to Serial + buffer (not via
+  // write(), to avoid recursing into the line-start logic).
+  void emitPrefix()
+  {
+    char buf[24];
+    time_t now = time(nullptr);
+    struct tm tmv;
+    localtime_r(&now, &tmv);
+    if (tmv.tm_year + 1900 >= 2021)   // NTP synced -> real date/time
+      snprintf(buf, sizeof(buf), "%04d-%02d-%02d %02d:%02d:%02d ",
+               tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday,
+               tmv.tm_hour, tmv.tm_min, tmv.tm_sec);
+    else                              // pre-sync -> uptime so lines are still ordered
+      snprintf(buf, sizeof(buf), "[boot+%lus] ", (unsigned long)(millis() / 1000));
+    for (const char *p = buf; *p; p++) { Serial.write(*p); logPush((uint8_t)*p); }
+  }
+
 public:
   size_t write(uint8_t c) override
   {
+    if (atLineStart && c != '\n' && c != '\r') { emitPrefix(); atLineStart = false; }
     Serial.write(c);
     logPush(c);
+    if (c == '\n') atLineStart = true;
     return 1;
   }
   size_t write(const uint8_t *buffer, size_t size) override
   {
-    Serial.write(buffer, size);
-    for (size_t i = 0; i < size; i++) logPush(buffer[i]);
+    for (size_t i = 0; i < size; i++) write(buffer[i]);  // per-byte, so prefixing works
     return size;
   }
 };
@@ -444,11 +466,9 @@ void loop()
   server.handleClient();
 
   // Switch screen every 15 seconds
-  if (now - lastScreenSwitch > 15000) 
+  if (now - lastScreenSwitch > 15000)
   {
-    //Debug time:
-    serialPrintTime();
-    //debugTZ();
+    // (every log line is now timestamped, so the old periodic serialPrintTime() is gone)
     showWeatherScreen = !showWeatherScreen;
     lastScreenSwitch = now;
     // If switching to weather screen, update weather data (limit fetch frequency)
@@ -2172,6 +2192,47 @@ static bool isNightNow()
   return !inRangeWrap(nowEpoch, riseE, setE);
 }
 
+// Width in pixels of a string in the classic font.
+static int classicTextWidth(const String &s)
+{
+  int16_t x1, y1; uint16_t w, h;
+  display.setFont(NULL);
+  display.getTextBounds(s, 0, 0, &x1, &y1, &w, &h);
+  return (int)w;
+}
+
+// Choose the weather-screen title and whether the top-right status icons fit.
+// The title is centered and the icons live in the top-right corner ([iconLeft..127]).
+// If the centered title would reach the icons we first drop the country part
+// (everything after the first comma); if it still collides we skip the icons; and
+// if the title is wider than the whole screen we truncate it to fit.
+static void weatherTitleAndIcons(String &name, bool &drawIcons)
+{
+  name = config_city;
+  drawIcons = true;
+
+  const int iconLeft = config_netatmo_enabled ? 107 : 117;  // matches drawTopStatusIcons()
+  const int gap = 3;
+  // A centered string of width w spans [(128-w)/2 .. (128+w)/2]; it clears the
+  // icons when its right edge (128+w)/2 <= iconLeft-gap, i.e. w <= maxW.
+  const int maxW = 2 * (iconLeft - gap) - 128;
+
+  if (classicTextWidth(name) > maxW)
+  {
+    int comma = name.indexOf(',');           // "City, Country" -> keep "City"
+    if (comma > 0)
+    {
+      String shortName = name.substring(0, comma);
+      shortName.trim();
+      name = shortName;
+    }
+    if (classicTextWidth(name) > maxW) drawIcons = false;  // still too wide -> no icons
+  }
+  // If the title is wider than the whole screen, truncate it to fit.
+  while (name.length() > 0 && classicTextWidth(name) > 128)
+    name.remove(name.length() - 1);
+}
+
 void drawWeatherScreen()
 {
   if (!displayInitialized)
@@ -2184,11 +2245,13 @@ void drawWeatherScreen()
 
   int16_t x1, y1; uint16_t w, h;
 
-  // Top center: city name
+  // Top center: city name (shortened if needed; status icons drawn later iff they fit)
+  String title; bool showStatusIcons;
+  weatherTitleAndIcons(title, showStatusIcons);
   display.setFont(NULL);
-  display.getTextBounds(config_city, 0, 0, &x1, &y1, &w, &h);
+  display.getTextBounds(title, 0, 0, &x1, &y1, &w, &h);
   display.setCursor((128 - w) / 2, 0);
-  display.print(config_city);
+  display.print(title);
 
   bool haveTemp = (weather_valid && weather_temp != "N/A");
   // Pick an icon only if enabled, weather is valid, and the code maps to one.
@@ -2278,6 +2341,9 @@ void drawWeatherScreen()
 
   // Full-width separator line near the bottom.
   display.drawFastHLine(0, 52, 128, SSD1306_WHITE);
+
+  // WiFi meter + Netatmo mark, but only if the city title left room for them.
+  if (showStatusIcons) drawTopStatusIcons();
 
   display.display();
 }
