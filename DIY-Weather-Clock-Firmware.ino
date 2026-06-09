@@ -72,6 +72,37 @@ const int ADDR_NETATMO_STATION       = 832;  // up to 63 chars (outdoor-module o
 // Wi-Fi and server:
 ESP8266WebServer server(80);
 ESP8266HTTPUpdateServer httpUpdater;  // OTA firmware upload, wired to `server` at /update
+
+// Streams an HTTP response body in small chunks instead of building the whole
+// page in one big heap String. The config portal was ~8 KB assembled with
+// hundreds of `page += ...` appends; on this tiny-heap part that single growing
+// allocation fragmented the heap on every request. ChunkedResponse buffers up to
+// CHUNK bytes and flushes to server.sendContent() (HTTP chunked transfer) as it
+// fills, so peak heap is one chunk regardless of page size. It is used exactly
+// like a String (`out += ...`); the constructor sends the headers and the
+// destructor flushes the tail + the terminating chunk.
+class ChunkedResponse
+{
+  static const size_t CHUNK = 512;
+  String buf;
+  bool   done = false;
+public:
+  ChunkedResponse(int code = 200, const char *type = "text/html")
+  {
+    buf.reserve(CHUNK + 64);
+    server.setContentLength(CONTENT_LENGTH_UNKNOWN);   // -> chunked transfer encoding
+    server.send(code, type, "");                       // emit status + headers now
+  }
+  ~ChunkedResponse() { finish(); }
+
+  void flush()  { if (buf.length()) { server.sendContent(buf); buf = ""; } }
+  void finish() { if (done) return; flush(); server.sendContent(""); done = true; }  // "" = terminating chunk
+
+  ChunkedResponse &operator+=(const char *s)                { buf += s; if (buf.length() >= CHUNK) flush(); return *this; }
+  ChunkedResponse &operator+=(const String &s)              { buf += s; if (buf.length() >= CHUNK) flush(); return *this; }
+  ChunkedResponse &operator+=(const __FlashStringHelper *s) { buf += s; if (buf.length() >= CHUNK) flush(); return *this; }
+  ChunkedResponse &operator+=(char c)                       { buf += c; if (buf.length() >= CHUNK) flush(); return *this; }
+};
 const char *AP_SSID = "Clock-ESP01-Setup";  // Access Point SSID for config mode
 const char *AP_PASSWD = "hackmeinnow";      //Password for the Access Point
 
@@ -728,8 +759,10 @@ void beginWebServer()
   // Setup web server routes
   server.on("/", HTTP_GET, []()
   {
-    // HTML page for config
-    String page = "<!DOCTYPE html><html><head><meta charset='UTF-8'>";
+    // HTML page for config — streamed in chunks (see ChunkedResponse) so the
+    // ~8 KB page never lives in the heap all at once.
+    ChunkedResponse page;
+    page += "<!DOCTYPE html><html><head><meta charset='UTF-8'>";
     page += "<title>Clock ESP Setup</title>";
 
     // --- Improved CSS ---
@@ -1128,8 +1161,7 @@ void beginWebServer()
     page += "<a href='/credits' style='text-decoration:none;'>";
     page += "<button type='button' class='btn' style='background:#3f51b5;'>Credits</button></a>";
     page += "</div></body></html>";
-
-    server.send(200, "text/html", page);
+    page.finish();   // flush tail + terminating chunk
   });
 
   server.on("/", HTTP_POST, handleConfigForm);
@@ -1142,7 +1174,8 @@ void beginWebServer()
   // POST that flashes the firmware (field name != "filesystem" => U_FLASH).
   server.on("/update", HTTP_GET, []()
   {
-    String p = "<!DOCTYPE html><html><head><meta charset='UTF-8'>";
+    ChunkedResponse p;
+    p += "<!DOCTYPE html><html><head><meta charset='UTF-8'>";
     p += "<meta name='viewport' content='width=device-width,initial-scale=1'>";
     p += "<title>Firmware update</title><style>";
     p += "body{margin:0;background:#f0f2f5;font-family:sans-serif;}";
@@ -1160,7 +1193,7 @@ void beginWebServer()
     p += "<button class='btn' type='submit'>Upload &amp; flash</button>";
     p += "</form><p><a href='/'>&larr; Back to configuration</a></p>";
     p += "</div></body></html>";
-    server.send(200, "text/html", p);
+    p.finish();
   });
 
   // OTA: registers GET /update (upload form) + POST /update (flash). No auth on purpose.
@@ -1172,8 +1205,7 @@ void beginWebServer()
 // Dumps the in-RAM serial log buffer as plain text, oldest byte first.
 void handleLog()
 {
-  String out;
-  out.reserve(LOG_BUF_SIZE + 80);
+  ChunkedResponse out(200, "text/plain; charset=utf-8");
   if (logWrapped)
   {
     // Buffer has overflowed: warn that we only keep the most recent bytes, and
@@ -1185,7 +1217,6 @@ void handleLog()
     for (size_t i = logPos; i < LOG_BUF_SIZE; i++) out += logBuf[i];
   }
   for (size_t i = 0; i < logPos; i++) out += logBuf[i];
-  server.send(200, "text/plain; charset=utf-8", out);
 }
 
 // Forces an immediate weather fetch from the web portal (handy for debugging).
@@ -1195,17 +1226,18 @@ void handleForceWeather()
   weather_valid = getWeather();
   applyNetatmoOverlay();
   lastWeatherFetch = millis();
-  String page = "<html><head><meta charset='UTF-8'></head><body>";
+  ChunkedResponse page;
+  page += "<html><head><meta charset='UTF-8'></head><body>";
   page += "<h3>Weather fetch ";
   page += (weather_valid ? "OK" : "failed");
   page += "</h3><p><a href='/'>Back to configuration</a></p></body></html>";
-  server.send(200, "text/html", page);
 }
 
 // Credits page: links to the project and the third-party data/icon sources.
 void handleCredits()
 {
-  String page = "<!DOCTYPE html><html><head><meta charset='UTF-8'>";
+  ChunkedResponse page;
+  page += "<!DOCTYPE html><html><head><meta charset='UTF-8'>";
   page += "<title>Credits</title><style>";
   page += "body{margin:0;background:#f0f2f5;font-family:sans-serif;}";
   page += ".container{max-width:520px;margin:32px auto;padding:22px;background:#fff;";
@@ -1219,7 +1251,6 @@ void handleCredits()
   page += "<li>Original firmware / inspiration: <a href='https://www.whynot.org.ua/en/electronic-kits/hu-061-diy-kit-wi-fi-weather-forecast-clock' target='_blank'>WHYNOT blog (HU-061 kit)</a></li>";
   page += "</ul><p><a href='/'>&larr; Back to configuration</a></p>";
   page += "</div></body></html>";
-  server.send(200, "text/html", page);
 }
 
 void handleConfigForm()
@@ -1892,11 +1923,11 @@ uint8_t lastBrightness_ = 0;
 
 uint8_t calculateDisplayBrightness()
 {
-  uint8_t brightness = calculateDisplayBrightness_d(false);
+  uint8_t brightness = computeBrightness(false);
   if(brightness != lastBrightness_)
   {
     lastBrightness_ = brightness;
-    //calculateDisplayBrightness_d(true);
+    //computeBrightness(true);
     Log.print("Calculated Brightness: ");
     Log.println(brightness);
   }
@@ -1962,7 +1993,11 @@ static void resolveSunWindow(time_t &nowEpoch, time_t &dawnE, time_t &riseE,
   if (duskE >= todayStartsSec + SEC_PER_DAY) duskE -= SEC_PER_DAY;
 }
 
-uint8_t calculateDisplayBrightness_d(bool debug)
+// Worker that actually computes the brightness for "now" from the sun window
+// (dawn ramp -> day plateau -> dusk ramp -> night). `debug` logs the resolved sun
+// times. calculateDisplayBrightness() is the public accessor that caches this and
+// logs only on change.
+uint8_t computeBrightness(bool debug)
 {
   if (config_variableContrast == false)
     return 255;
