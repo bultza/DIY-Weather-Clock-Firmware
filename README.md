@@ -12,11 +12,6 @@ or AliExpress. The kit includes a plexiglass structure and three PCB boards:
 <br/>Clock Face on the left, Weather face on the right
 </div>
 
-<div align="center">
-<img src="tools/screen_sim/screens.png" alt="Different possible Weather faces samples" width="80%"/>
-<br/>Different Faces examples showing different possible customizations
-</div>
-
 ## Why
 This kit already ships with a ready-to-use firmware, but it requires registering
 on an external website and you have no real control over what the firmware does
@@ -31,6 +26,13 @@ modified and cleaned up to:
 - add proper configuration and robustness
 - support metric / imperial units
 - support real automatic daylight-saving time (DST)
+- support weather icons
+- support for **Netatmo** weather stations (this is optional)
+
+<div align="center">
+<img src="tools/screen_sim/screens.png" alt="Different possible Weather faces samples" width="80%"/>
+<br/>Different Faces examples showing different possible customizations
+</div>
 
 ## How it works
 
@@ -59,13 +61,12 @@ Once configured and rebooted:
 - Timezone handling uses proper DST rules (not fixed offsets)
 - Weather data is retrieved from wttr.in every 15 minutes
 - If Netatmo is enabled, the outdoor temperature/humidity and pressure are taken
-  from your own station instead (the condition, icon and sun times still come
+  from your own station instead, also every 15 minutes (the condition, icon and sun times still come
   from wttr.in)
-- The configuration web portal stays available at the device's IP (shown on the
-  OLED at boot), so you can reconfigure it from a browser at any time — no need
+- The configuration web portal stays available at the device's **IP (shown on the OLED at boot for 8 seconds)**, so you can reconfigure it from a browser at any time — no need
   to force AP mode or re-flash
 - The device's serial log is kept in a small RAM buffer and can be viewed from a
-  web page, so you can debug the clock over Wi-Fi without a serial cable
+  web page, so you can debug the clock over Wi-Fi without a serial cable.
 - Firmware can be updated over the air (OTA): once it is running, you can upload a
   new `.bin` from a browser at `http://<device-ip>/update`, so you only need the
   USB/FTDI cable for the very first flash
@@ -110,7 +111,7 @@ from wttr.in — Netatmo doesn't provide those — so the two work together.
 
 If Netatmo is unreachable, the clock automatically falls back to the wttr.in
 values, and the clock screen shows a small `!` next to the Wi-Fi meter (it shows
-a Netatmo "OK" mark when the last update succeeded).
+a Netatmo "OK" (Netatmo icon) mark when the last update succeeded).
 
 ### One-time setup at Netatmo
 
