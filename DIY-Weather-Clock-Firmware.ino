@@ -42,7 +42,7 @@
 #include "netatmo.h"         // Netatmo Weather API client (token refresh + getstationsdata)
 
 // Firmware version (bump this on each release)
-#define FW_VERSION "V2.0.2"
+#define FW_VERSION "V2.0.3"
 
 // Pin definitions (ESP-01):
 const uint8_t SDA_PIN = 0;           // I2C SDA connected to GPIO0
@@ -206,6 +206,7 @@ bool     config_hidePlusTemp      = false;  //omit the '+' before positive tempe
 bool     config_time12h           = false;  //12-hour clock (AM/PM) instead of 24-hour
 bool     config_dateUS            = false;  //date as MM/DD/YYYY instead of DD/MM/YYYY
 bool     config_showWeatherIcon   = true;   //show a weather icon on the weather screen
+bool     config_pressure_mmhg     = false;  //show pressure in mmHg instead of hPa (applies to hPa/metric + Netatmo)
 
 // Netatmo (V2.0.0): when enabled, the user's own station provides temp/humidity
 // (outdoor module) + pressure (main module); wttr.in still supplies condition,
@@ -257,11 +258,11 @@ bool rebootIn10mins = false;
 // 8 KB buffer holds Fastly's TLS records (verified on-device). No auto-flashing:
 // we only surface "an update is available".
 //
-// TEMP: pointing at the 'develop' branch so we can test end-to-end before 'main'
-// has firmware/latest.json. Switch 'develop' -> 'main' for the real release.
+// Published on the 'main' branch and kept in sync with FW_VERSION by the
+// Publish-latest-json GitHub Action (see .github/workflows/).
 static const char UPDATE_JSON_HOST[] = "raw.githubusercontent.com";
 static const char UPDATE_JSON_URL[]  =
-  "https://raw.githubusercontent.com/bultza/DIY-Weather-Clock-Firmware/develop/firmware/latest.json";
+  "https://raw.githubusercontent.com/bultza/DIY-Weather-Clock-Firmware/main/firmware/latest.json";
 
 bool   g_updateAvailable = false;   // set by checkFirmwareUpdate()
 String g_latestVersion   = "";      // remote version string when newer than ours
@@ -959,6 +960,19 @@ void beginWebServer()
 
     page += "</div></div>";
 
+    // Pressure unit radio (hPa / mmHg). Applies to hPa values (metric + Netatmo);
+    // in imperial mode wttr.in reports inHg and this option has no effect.
+    page += "<div class='row'><label>Pressure unit:</label>";
+    page += "<div class='radiowrap'>";
+    page += "<label class='radioopt'><input type='radio' name='pressunit' value='hpa'";
+    if (!config_pressure_mmhg) page += " checked";
+    page += ">hPa</label>";
+    page += "<label class='radioopt'><input type='radio' name='pressunit' value='mmhg'";
+    if (config_pressure_mmhg) page += " checked";
+    page += ">mmHg</label>";
+    page += "</div></div>";
+    page += "<div class='hint' style='margin:-4px 0 6px 0;'>mmHg applies to hPa values (metric &amp; Netatmo); imperial keeps inHg from wttr.in.</div>";
+
     // Time format radio (24h / 12h)
     page += "<div class='row'><label>Time format:</label>";
     page += "<div class='radiowrap'>";
@@ -1447,6 +1461,7 @@ void handleConfigForm()
   // Existing fields
   bool   showSeconds = server.hasArg("showseconds"); // checkbox: present => true
   String units       = server.arg("units");          // "metric" or "imperial"
+  bool   pressMmhg   = (server.arg("pressunit") == "mmhg");   // pressure unit: hPa/mmHg
 
   // Display format fields
   bool   hidePlusTemp = server.hasArg("hideplus");   // checkbox: present => true
@@ -1580,6 +1595,7 @@ void handleConfigForm()
 
   config_showSeconds = showSeconds;
   config_imperial    = imperial;
+  config_pressure_mmhg = pressMmhg;
 
   config_hidePlusTemp = hidePlusTemp;
   config_time12h      = time12h;
@@ -1700,6 +1716,7 @@ void loadSettings()
     config_time12h      = false;
     config_dateUS       = false;
     config_showWeatherIcon = true;
+    config_pressure_mmhg   = false;
 
     config_netatmo_enabled       = false;
     config_netatmo_client_id     = "";
@@ -1752,6 +1769,7 @@ void loadSettings()
   // which is exactly the intended default for existing devices.
   uint8_t flags2 = EEPROM.read(ADDR_VARIABLES + 13);
   config_showWeatherIcon = (flags2 & (1 << 0)) != 0;
+  config_pressure_mmhg   = (flags2 & (1 << 2)) != 0;   // bit 1 is Netatmo (below)
 
   // --- Netatmo region (V2.0.0) ---
   if (sigCurrent)
@@ -1796,6 +1814,7 @@ void loadSettings()
   Log.print(F("Timezone manual: ")); Log.println(config_timezone_manual ? "true" : "false");
   Log.print(F("Show seconds: ")); Log.println(config_showSeconds ? "true" : "false");
   Log.print(F("Units imperial: ")); Log.println(config_imperial ? "true" : "false");
+  Log.print(F("Pressure mmHg: ")); Log.println(config_pressure_mmhg ? "true" : "false");
 
   // Display-format flags (previously read but not logged)
   Log.print(F("Hide + on positive temp: ")); Log.println(config_hidePlusTemp ? "true" : "false");
@@ -1901,6 +1920,7 @@ void saveSettings()
   uint8_t flags2 = 0;
   if (config_showWeatherIcon) flags2 |= (1 << 0);
   if (config_netatmo_enabled) flags2 |= (1 << 1);
+  if (config_pressure_mmhg)   flags2 |= (1 << 2);
   EEPROM.write(ADDR_VARIABLES + 13, flags2);
 
   // Netatmo credentials region (V2.0.0)
@@ -1973,6 +1993,40 @@ bool netatmoUpdateReadings(NetatmoReadings &out)
   return true;
 }
 
+// --- Pressure display unit --------------------------------------------------
+// Netatmo and metric wttr.in report hPa; the user can opt to show mmHg instead
+// (1 hPa = 0.750061683 mmHg). Imperial wttr.in returns inHg, left untouched — the
+// mmHg option only rewrites hPa values.
+static const float HPA_TO_MMHG = 0.750061683f;
+
+// Format an hPa value as the configured unit string, e.g. "1014hPa" / "761mmHg".
+static String formatPressureHpa(float hpa)
+{
+  if (config_pressure_mmhg)
+    return String((int)lroundf(hpa * HPA_TO_MMHG)) + "mmHg";
+  return String((int)lroundf(hpa)) + "hPa";
+}
+
+// Pull the leading numeric value out of a string like "1014hPa" -> 1014.0.
+// Returns false if there are no digits (e.g. "N/A").
+static bool parseLeadingFloat(const String &s, float &out)
+{
+  String num;
+  bool any = false, dot = false;
+  for (size_t i = 0; i < s.length(); i++)
+  {
+    char c = s[i];
+    if (c >= '0' && c <= '9')            { num += c; any = true; }
+    else if ((c == '-' || c == '+') && !any && num.length() == 0) num += c;
+    else if (c == '.' && !dot)           { num += c; dot = true; }
+    else if (c == ' ' && !any)           continue;   // skip leading spaces
+    else break;
+  }
+  if (!any) return false;
+  out = num.toFloat();
+  return true;
+}
+
 // Overlay Netatmo temp/humidity/pressure on top of the wttr.in result. Condition,
 // icon code and sun times are left as wttr.in provided them. On any Netatmo failure
 // the wttr.in values are kept untouched. Netatmo returns values in the account's
@@ -2006,7 +2060,7 @@ void applyNetatmoOverlay()
     weather_temp = b;
   }
   if (nr.haveHum)   weather_hum   = String(nr.hum) + "%";
-  if (nr.havePress) weather_press = String((int)lroundf(nr.pressure)) + "hPa";
+  if (nr.havePress) weather_press = formatPressureHpa(nr.pressure);
 
   Log.print(F("[netatmo] overlay applied from '")); Log.print(nr.station);
   Log.print(F("' / '")); Log.print(nr.module); Log.println(F("'"));
@@ -2877,7 +2931,14 @@ bool getWeather()
   weather_cond = condStr;
   weather_hum = humStr;
   weather_wind = windStr;
+  // Metric wttr.in gives hPa: re-format it through the configured unit (hPa/mmHg).
+  // Imperial gives inHg, which we leave exactly as received (mmHg is hPa-only).
   weather_press = pressStr;
+  if (!config_imperial)
+  {
+    float hpa;
+    if (parseLeadingFloat(pressStr, hpa)) weather_press = formatPressureHpa(hpa);
+  }
   weather_code = codeStr.toInt();   // WWO condition code, used to pick the icon
   Log.print(F("Code=")); Log.println(weather_code);
 
