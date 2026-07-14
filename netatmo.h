@@ -225,5 +225,14 @@ static bool netatmoFetch(const String &accessToken, const String &wantName,
 
   log.print(F("[netatmo] matched station='")); log.print(out.station);
   log.print(F("' module='")); log.print(out.module); log.println('\'');
+
+  // Log the parsed readings (the actual values we got from Netatmo).
+  log.print(F("[netatmo] parsed:"));
+  if (out.haveTemp)  { log.print(F(" temp=")); log.print(out.tempC, 1);   log.print(F("C")); }
+  if (out.haveHum)   { log.print(F(" hum=")); log.print(out.hum);         log.print(F("%")); }
+  if (out.havePress) { log.print(F(" press=")); log.print(out.pressure, 1); log.print(F("hPa")); }
+  if (!out.haveTemp && !out.haveHum && !out.havePress) log.print(F(" (none)"));
+  log.println();
+
   return out.haveTemp || out.haveHum || out.havePress;
 }

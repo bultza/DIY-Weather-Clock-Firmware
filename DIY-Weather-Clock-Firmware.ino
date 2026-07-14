@@ -42,7 +42,7 @@
 #include "netatmo.h"         // Netatmo Weather API client (token refresh + getstationsdata)
 
 // Firmware version (bump this on each release)
-#define FW_VERSION "V2.0.1"
+#define FW_VERSION "V2.0.3"
 
 // Pin definitions (ESP-01):
 const uint8_t SDA_PIN = 0;           // I2C SDA connected to GPIO0
@@ -72,6 +72,37 @@ const int ADDR_NETATMO_STATION       = 832;  // up to 63 chars (outdoor-module o
 // Wi-Fi and server:
 ESP8266WebServer server(80);
 ESP8266HTTPUpdateServer httpUpdater;  // OTA firmware upload, wired to `server` at /update
+
+// Streams an HTTP response body in small chunks instead of building the whole
+// page in one big heap String. The config portal was ~8 KB assembled with
+// hundreds of `page += ...` appends; on this tiny-heap part that single growing
+// allocation fragmented the heap on every request. ChunkedResponse buffers up to
+// CHUNK bytes and flushes to server.sendContent() (HTTP chunked transfer) as it
+// fills, so peak heap is one chunk regardless of page size. It is used exactly
+// like a String (`out += ...`); the constructor sends the headers and the
+// destructor flushes the tail + the terminating chunk.
+class ChunkedResponse
+{
+  static const size_t CHUNK = 512;
+  String buf;
+  bool   done = false;
+public:
+  ChunkedResponse(int code = 200, const char *type = "text/html")
+  {
+    buf.reserve(CHUNK + 64);
+    server.setContentLength(CONTENT_LENGTH_UNKNOWN);   // -> chunked transfer encoding
+    server.send(code, type, "");                       // emit status + headers now
+  }
+  ~ChunkedResponse() { finish(); }
+
+  void flush()  { if (buf.length()) { server.sendContent(buf); buf = ""; } }
+  void finish() { if (done) return; flush(); server.sendContent(""); done = true; }  // "" = terminating chunk
+
+  ChunkedResponse &operator+=(const char *s)                { buf += s; if (buf.length() >= CHUNK) flush(); return *this; }
+  ChunkedResponse &operator+=(const String &s)              { buf += s; if (buf.length() >= CHUNK) flush(); return *this; }
+  ChunkedResponse &operator+=(const __FlashStringHelper *s) { buf += s; if (buf.length() >= CHUNK) flush(); return *this; }
+  ChunkedResponse &operator+=(char c)                       { buf += c; if (buf.length() >= CHUNK) flush(); return *this; }
+};
 const char *AP_SSID = "Clock-ESP01-Setup";  // Access Point SSID for config mode
 const char *AP_PASSWD = "hackmeinnow";      //Password for the Access Point
 
@@ -100,20 +131,42 @@ static inline void logPush(uint8_t c)
 }
 
 // Print subclass: all print()/println() overloads come for free from Print and
-// are routed through write(), so we only mirror the bytes here.
+// are routed through write(), so we only mirror the bytes here. Every line is
+// prefixed with the local date+time (or an uptime stamp before NTP has synced)
+// so each entry in the web log is self-dated.
 class RingLog : public Print
 {
+  bool atLineStart = true;
+
+  // Emit the per-line timestamp prefix straight to Serial + buffer (not via
+  // write(), to avoid recursing into the line-start logic).
+  void emitPrefix()
+  {
+    char buf[24];
+    time_t now = time(nullptr);
+    struct tm tmv;
+    localtime_r(&now, &tmv);
+    if (tmv.tm_year + 1900 >= 2021)   // NTP synced -> real date/time
+      snprintf(buf, sizeof(buf), "%04d-%02d-%02d %02d:%02d:%02d ",
+               tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday,
+               tmv.tm_hour, tmv.tm_min, tmv.tm_sec);
+    else                              // pre-sync -> uptime so lines are still ordered
+      snprintf(buf, sizeof(buf), "[boot+%lus] ", (unsigned long)(millis() / 1000));
+    for (const char *p = buf; *p; p++) { Serial.write(*p); logPush((uint8_t)*p); }
+  }
+
 public:
   size_t write(uint8_t c) override
   {
+    if (atLineStart && c != '\n' && c != '\r') { emitPrefix(); atLineStart = false; }
     Serial.write(c);
     logPush(c);
+    if (c == '\n') atLineStart = true;
     return 1;
   }
   size_t write(const uint8_t *buffer, size_t size) override
   {
-    Serial.write(buffer, size);
-    for (size_t i = 0; i < size; i++) logPush(buffer[i]);
+    for (size_t i = 0; i < size; i++) write(buffer[i]);  // per-byte, so prefixing works
     return size;
   }
 };
@@ -153,6 +206,7 @@ bool     config_hidePlusTemp      = false;  //omit the '+' before positive tempe
 bool     config_time12h           = false;  //12-hour clock (AM/PM) instead of 24-hour
 bool     config_dateUS            = false;  //date as MM/DD/YYYY instead of DD/MM/YYYY
 bool     config_showWeatherIcon   = true;   //show a weather icon on the weather screen
+bool     config_pressure_mmhg     = false;  //show pressure in mmHg instead of hPa (applies to hPa/metric + Netatmo)
 
 // Netatmo (V2.0.0): when enabled, the user's own station provides temp/humidity
 // (outdoor module) + pressure (main module); wttr.in still supplies condition,
@@ -196,6 +250,25 @@ String weather_sundusk = "19:30";
 static const uint32_t REBOOT_AFTER_MS = 49UL * 24UL * 60UL * 60UL * 1000UL;
 bool rebootIn10mins = false;
 
+// --- Firmware update check ---------------------------------------------------
+// At boot (after the first wttr.in + Netatmo pull) the clock fetches a tiny JSON
+// from the GitHub repo and compares its "version" against FW_VERSION. GitHub is
+// served over TLS 1.2 (which BearSSL can do, unlike wttr.in's TLS 1.3); it does
+// NOT offer MFLN, and a 16 KB RX buffer won't fit our fragmented heap, but an
+// 8 KB buffer holds Fastly's TLS records (verified on-device). No auto-flashing:
+// we only surface "an update is available".
+//
+// Published on the 'main' branch and kept in sync with FW_VERSION by the
+// Publish-latest-json GitHub Action (see .github/workflows/).
+static const char UPDATE_JSON_HOST[] = "raw.githubusercontent.com";
+static const char UPDATE_JSON_URL[]  =
+  "https://raw.githubusercontent.com/bultza/DIY-Weather-Clock-Firmware/main/firmware/latest.json";
+
+bool   g_updateAvailable = false;   // set by checkFirmwareUpdate()
+String g_latestVersion   = "";      // remote version string when newer than ours
+uint32_t lastUpdateCheckMs = 0;     // millis() of the last check (boot + every 24 h)
+static const unsigned long UPDATE_CHECK_INTERVAL_MS = 24UL * 60UL * 60UL * 1000UL;
+
 // Function prototypes:
 void loadSettings();
 void saveSettings();
@@ -205,6 +278,9 @@ void handleConfigForm();
 void handleLog();
 void handleForceWeather();
 void handleCredits();
+void handleCheckUpdate();                          // manual "check for firmware update now"
+void checkFirmwareUpdate();                        // fetch latest.json, compare to FW_VERSION
+void showUpdateBanner();                           // boot splash when an update is available
 void drawTimeScreen();
 void drawWeatherScreen();
 bool getWeather();
@@ -217,6 +293,8 @@ uint8_t calculateDisplayBrightness();
 bool netatmoUpdateReadings(NetatmoReadings &out);  // refresh token if needed + fetch
 void applyNetatmoOverlay();                        // overlay Netatmo values on weather_*
 void drawTopStatusIcons();                         // WiFi meter + Netatmo "!" on the clock screen
+void drawUpdateHeart();                            // beating heart when a firmware update is available
+static bool heartBeatBig();                         // heartbeat waveform (used by computeFrameSig too)
 
 void setup() 
 {
@@ -388,6 +466,11 @@ void setup()
     Log.println(F("Initial weather fetch failed."));
   }
 
+  // After the first weather + Netatmo pull, ask GitHub whether a newer firmware
+  // exists. Sets g_updateAvailable / g_latestVersion (no auto-flash).
+  checkFirmwareUpdate();
+  lastUpdateCheckMs = millis();   // schedule the next automatic re-check 24 h later
+
   // Make sure the portal IP stayed readable for at least 8 s. The NTP and
   // weather work above already ate part of that time, so only wait for the
   // remainder (if any) instead of blocking a full 8 s.
@@ -396,6 +479,71 @@ void setup()
     unsigned long elapsed = millis() - ipShownAt;
     if (elapsed < 8000) delay(8000 - elapsed);
   }
+
+  // If an update is available, extend the boot by 8 s showing it on the OLED so
+  // it's noticed at power-on (this is the only place it blocks; normal operation
+  // just surfaces it in the web portal / status icon later).
+  if (g_updateAvailable) showUpdateBanner();
+}
+
+// WiFi signal strength as 0-4 bars (also used by the frame signature). Quantized,
+// so it only changes when the RSSI crosses a threshold (no constant redraws).
+static int wifiBars()
+{
+  if (WiFi.status() != WL_CONNECTED) return 0;
+  long rssi = WiFi.RSSI();
+  if (rssi >= -55) return 4;
+  if (rssi >= -65) return 3;
+  if (rssi >= -72) return 2;
+  return 1;
+}
+
+// --- Frame-change detection ---------------------------------------------
+// The display loop ran a full ~1 KB I2C transfer (display.display()) every loop
+// iteration even though the visible content changes at most once per second. We
+// hash everything that affects the pixels into a 32-bit signature and only redraw
+// when it changes. Brightness is intentionally NOT in the signature: it fades very
+// slowly and the 15 s screen toggle refreshes it often enough.
+static uint32_t g_lastFrameSig = 0;
+
+static inline uint32_t fnvByte(uint32_t h, uint8_t b) { h ^= b; return h * 16777619u; }
+static uint32_t fnvStr(uint32_t h, const String &s)
+{
+  for (size_t i = 0; i < s.length(); i++) h = fnvByte(h, (uint8_t)s[i]);
+  return h;
+}
+
+static uint32_t computeFrameSig()
+{
+  time_t now = time(nullptr);                 // non-blocking (unlike getLocalTime)
+  struct tm ti; localtime_r(&now, &ti);
+
+  uint32_t h = 2166136261u;
+  h = fnvByte(h, showWeatherScreen ? 1 : 0);
+  h = fnvByte(h, (uint8_t)ti.tm_hour);
+  h = fnvByte(h, (uint8_t)ti.tm_min);
+  if (config_showSeconds && !showWeatherScreen) h = fnvByte(h, (uint8_t)ti.tm_sec);
+  h = fnvByte(h, (uint8_t)ti.tm_mday);
+  h = fnvByte(h, (uint8_t)ti.tm_wday);
+  h = fnvByte(h, (uint8_t)ti.tm_mon);
+
+  h = fnvByte(h, weather_valid ? 1 : 0);
+  h = fnvStr(h, weather_temp);
+  h = fnvStr(h, weather_cond);
+  h = fnvStr(h, weather_hum);
+  h = fnvStr(h, weather_wind);
+  h = fnvStr(h, weather_press);
+  h = fnvByte(h, (uint8_t)weather_code);
+
+  h = fnvByte(h, (uint8_t)wifiBars());
+  // Only perturb the signature (forcing the change-only redraw to animate) while
+  // an update is pending, so the beating heart costs nothing the rest of the time.
+  if (g_updateAvailable) h = fnvByte(h, heartBeatBig() ? 1 : 0);
+  uint8_t nstat = config_netatmo_enabled
+                    ? (netatmoConsecFails > 0 ? 2 : (netatmoLastAttemptOk ? 1 : 3))
+                    : 0;
+  h = fnvByte(h, nstat);
+  return h;
 }
 
 void loop()
@@ -444,11 +592,9 @@ void loop()
   server.handleClient();
 
   // Switch screen every 15 seconds
-  if (now - lastScreenSwitch > 15000) 
+  if (now - lastScreenSwitch > 15000)
   {
-    //Debug time:
-    serialPrintTime();
-    //debugTZ();
+    // (every log line is now timestamped, so the old periodic serialPrintTime() is gone)
     showWeatherScreen = !showWeatherScreen;
     lastScreenSwitch = now;
     // If switching to weather screen, update weather data (limit fetch frequency)
@@ -473,14 +619,31 @@ void loop()
     }
   }
 
-  // Draw the appropriate screen
-  if (showWeatherScreen && weather_valid) 
+  // Re-check GitHub for a newer firmware once every 24 h. Only updates the flag
+  // (which the web portal's red banner reflects); it does NOT pop the OLED banner
+  // mid-operation — that would interrupt the clock. ~1 s blocking TLS fetch.
+  if (now - lastUpdateCheckMs > UPDATE_CHECK_INTERVAL_MS)
   {
-    drawWeatherScreen();
-  } 
-  else 
+    lastUpdateCheckMs = now;
+    Log.println(F("[update] 24h periodic re-check..."));
+    checkFirmwareUpdate();
+  }
+
+  // Draw the appropriate screen, but only when the visible content changed —
+  // otherwise we'd re-transfer the whole framebuffer over I2C tens of times a
+  // second for nothing.
+  uint32_t sig = computeFrameSig();
+  if (sig != g_lastFrameSig)
   {
-    drawTimeScreen();
+    g_lastFrameSig = sig;
+    if (showWeatherScreen && weather_valid)
+    {
+      drawWeatherScreen();
+    }
+    else
+    {
+      drawTimeScreen();
+    }
   }
 
   // Small delay to yield to system
@@ -644,8 +807,10 @@ void beginWebServer()
   // Setup web server routes
   server.on("/", HTTP_GET, []()
   {
-    // HTML page for config
-    String page = "<!DOCTYPE html><html><head><meta charset='UTF-8'>";
+    // HTML page for config — streamed in chunks (see ChunkedResponse) so the
+    // ~8 KB page never lives in the heap all at once.
+    ChunkedResponse page;
+    page += "<!DOCTYPE html><html><head><meta charset='UTF-8'>";
     page += "<title>Clock ESP Setup</title>";
 
     // --- Improved CSS ---
@@ -673,6 +838,17 @@ void beginWebServer()
     page += "<p style='text-align:center;margin:-8px 0 16px;font-size:13px;color:#666;'>Firmware ";
     page += FW_VERSION;
     page += " &middot; <a href='https://github.com/bultza/DIY-Weather-Clock-Firmware' target='_blank'>Project page</a></p>";
+
+    // Red "new firmware available" banner (set by checkFirmwareUpdate()).
+    if (g_updateAvailable)
+    {
+      page += "<div style='margin:0 0 16px;padding:12px;border-radius:8px;background:#ffebee;border:1px solid #f44336;color:#b71c1c;text-align:center;font-size:14px;'>";
+      page += "&#9888; New firmware available: <b>";
+      page += htmlEscape(g_latestVersion);
+      page += "</b> (installed " FW_VERSION "). <a href='/update' style='color:#b71c1c;font-weight:bold;'>Update now</a>";
+      page += "</div>";
+    }
+
     page += "<form id='cfgform' method='POST' action='/'>";
 
     // WiFi SSID field
@@ -783,6 +959,19 @@ void beginWebServer()
     page += ">Imperial</label>";
 
     page += "</div></div>";
+
+    // Pressure unit radio (hPa / mmHg). Applies to hPa values (metric + Netatmo);
+    // in imperial mode wttr.in reports inHg and this option has no effect.
+    page += "<div class='row'><label>Pressure unit:</label>";
+    page += "<div class='radiowrap'>";
+    page += "<label class='radioopt'><input type='radio' name='pressunit' value='hpa'";
+    if (!config_pressure_mmhg) page += " checked";
+    page += ">hPa</label>";
+    page += "<label class='radioopt'><input type='radio' name='pressunit' value='mmhg'";
+    if (config_pressure_mmhg) page += " checked";
+    page += ">mmHg</label>";
+    page += "</div></div>";
+    page += "<div class='hint' style='margin:-4px 0 6px 0;'>mmHg applies to hPa values (metric &amp; Netatmo); imperial keeps inHg from wttr.in.</div>";
 
     // Time format radio (24h / 12h)
     page += "<div class='row'><label>Time format:</label>";
@@ -1044,21 +1233,22 @@ void beginWebServer()
     page += "<a href='/credits' style='text-decoration:none;'>";
     page += "<button type='button' class='btn' style='background:#3f51b5;'>Credits</button></a>";
     page += "</div></body></html>";
-
-    server.send(200, "text/html", page);
+    page.finish();   // flush tail + terminating chunk
   });
 
   server.on("/", HTTP_POST, handleConfigForm);
   server.on("/log", HTTP_GET, handleLog);
   server.on("/forceweather", HTTP_GET, handleForceWeather);
   server.on("/credits", HTTP_GET, handleCredits);
+  server.on("/checkupdate", HTTP_GET, handleCheckUpdate);   // TEMP: GitHub TLS 1.2 probe
   // Serve our own /update page (firmware only) BEFORE httpUpdater.setup(), so this
   // GET handler wins (first match) and the stock page -- which also offers a
   // confusing "FileSystem" upload -- is never shown. The updater still handles the
   // POST that flashes the firmware (field name != "filesystem" => U_FLASH).
   server.on("/update", HTTP_GET, []()
   {
-    String p = "<!DOCTYPE html><html><head><meta charset='UTF-8'>";
+    ChunkedResponse p;
+    p += "<!DOCTYPE html><html><head><meta charset='UTF-8'>";
     p += "<meta name='viewport' content='width=device-width,initial-scale=1'>";
     p += "<title>Firmware update</title><style>";
     p += "body{margin:0;background:#f0f2f5;font-family:sans-serif;}";
@@ -1076,7 +1266,7 @@ void beginWebServer()
     p += "<button class='btn' type='submit'>Upload &amp; flash</button>";
     p += "</form><p><a href='/'>&larr; Back to configuration</a></p>";
     p += "</div></body></html>";
-    server.send(200, "text/html", p);
+    p.finish();
   });
 
   // OTA: registers GET /update (upload form) + POST /update (flash). No auth on purpose.
@@ -1088,8 +1278,7 @@ void beginWebServer()
 // Dumps the in-RAM serial log buffer as plain text, oldest byte first.
 void handleLog()
 {
-  String out;
-  out.reserve(LOG_BUF_SIZE + 80);
+  ChunkedResponse out(200, "text/plain; charset=utf-8");
   if (logWrapped)
   {
     // Buffer has overflowed: warn that we only keep the most recent bytes, and
@@ -1101,7 +1290,6 @@ void handleLog()
     for (size_t i = logPos; i < LOG_BUF_SIZE; i++) out += logBuf[i];
   }
   for (size_t i = 0; i < logPos; i++) out += logBuf[i];
-  server.send(200, "text/plain; charset=utf-8", out);
 }
 
 // Forces an immediate weather fetch from the web portal (handy for debugging).
@@ -1111,17 +1299,18 @@ void handleForceWeather()
   weather_valid = getWeather();
   applyNetatmoOverlay();
   lastWeatherFetch = millis();
-  String page = "<html><head><meta charset='UTF-8'></head><body>";
+  ChunkedResponse page;
+  page += "<html><head><meta charset='UTF-8'></head><body>";
   page += "<h3>Weather fetch ";
   page += (weather_valid ? "OK" : "failed");
   page += "</h3><p><a href='/'>Back to configuration</a></p></body></html>";
-  server.send(200, "text/html", page);
 }
 
 // Credits page: links to the project and the third-party data/icon sources.
 void handleCredits()
 {
-  String page = "<!DOCTYPE html><html><head><meta charset='UTF-8'>";
+  ChunkedResponse page;
+  page += "<!DOCTYPE html><html><head><meta charset='UTF-8'>";
   page += "<title>Credits</title><style>";
   page += "body{margin:0;background:#f0f2f5;font-family:sans-serif;}";
   page += ".container{max-width:520px;margin:32px auto;padding:22px;background:#fff;";
@@ -1135,7 +1324,129 @@ void handleCredits()
   page += "<li>Original firmware / inspiration: <a href='https://www.whynot.org.ua/en/electronic-kits/hu-061-diy-kit-wi-fi-weather-forecast-clock' target='_blank'>WHYNOT blog (HU-061 kit)</a></li>";
   page += "</ul><p><a href='/'>&larr; Back to configuration</a></p>";
   page += "</div></body></html>";
-  server.send(200, "text/html", page);
+}
+
+// Turn a version string ("V2.0.3", "2.0.3", "v2.0") into a single comparable
+// number, MMMmmmppp (major*1e6 + minor*1e3 + patch). Any non-digit (like the
+// leading 'V') is ignored; missing components default to 0. Comparing the numbers
+// tells us "remote is newer" rather than merely "different" (avoids downgrades).
+static uint32_t parseVersion(const String &v)
+{
+  uint16_t part[3] = { 0, 0, 0 };
+  uint8_t  idx     = 0;
+  bool     inNum   = false;
+  for (size_t i = 0; i < v.length() && idx < 3; i++)
+  {
+    char c = v[i];
+    if (c >= '0' && c <= '9') { part[idx] = part[idx] * 10 + (c - '0'); inNum = true; }
+    else if (c == '.' && inNum) { idx++; inNum = false; }
+    // any other character (e.g. the leading 'V') is skipped
+  }
+  return (uint32_t)part[0] * 1000000UL + (uint32_t)part[1] * 1000UL + part[2];
+}
+
+// Extract a JSON  "key" : "value"  tolerating whitespace around the colon. We do
+// NOT reuse netatmo.h's njsonStr here: that one assumes compact output ("k":"v")
+// because Netatmo's API is compact, but a hand-/tool-written latest.json is often
+// pretty-printed ("version": "V2.0.3"), which njsonStr would miss.
+static String jsonQuotedValue(const String &s, const char *key)
+{
+  String needle = String('"') + key + '"';
+  int p = s.indexOf(needle);
+  if (p < 0) return "";
+  p += needle.length();
+  while (p < (int)s.length() && (s[p] == ' ' || s[p] == '\t' || s[p] == '\n' || s[p] == '\r')) p++;
+  if (p >= (int)s.length() || s[p] != ':') return "";
+  p++;
+  while (p < (int)s.length() && (s[p] == ' ' || s[p] == '\t' || s[p] == '\n' || s[p] == '\r')) p++;
+  if (p >= (int)s.length() || s[p] != '"') return "";
+  p++;
+  int e = s.indexOf('"', p);
+  if (e < 0) return "";
+  return s.substring(p, e);
+}
+
+// Fetch firmware/latest.json from GitHub over HTTPS and compare its "version"
+// against FW_VERSION. Sets g_updateAvailable / g_latestVersion. GitHub speaks
+// TLS 1.2 (BearSSL can) but offers no MFLN; an 8 KB RX buffer holds Fastly's TLS
+// records within our fragmented heap (a 16 KB one does not). No auto-flashing.
+void checkFirmwareUpdate()
+{
+  g_updateAvailable = false;
+  g_latestVersion   = "";
+
+  Log.println(F("[update] checking GitHub for newer firmware..."));
+  BearSSL::WiFiClientSecure client;
+  client.setInsecure();              // no cert validation, same policy as Netatmo
+  client.setBufferSizes(8192, 512);  // proven on-device: fits Fastly TLS + our heap
+
+  HTTPClient http; http.setReuse(false);
+  http.useHTTP10(true);              // un-chunked body, clean getString()
+  if (!http.begin(client, UPDATE_JSON_URL))
+  {
+    Log.println(F("[update] begin() failed"));
+    return;
+  }
+  int code = http.GET();
+  Log.print(F("[update] HTTP ")); Log.println(code);
+  if (code != 200) { http.end(); return; }
+
+  String payload = http.getString();
+  http.end();
+
+  String remote = jsonQuotedValue(payload, "version");   // whitespace-tolerant
+  remote.trim();
+  if (remote.length() == 0) { Log.println(F("[update] response missing 'version'")); return; }
+
+  uint32_t rv = parseVersion(remote);
+  uint32_t lv = parseVersion(FW_VERSION);
+  Log.print(F("[update] local=")); Log.print(FW_VERSION);
+  Log.print(F(" remote=")); Log.print(remote);
+  Log.print(F(" -> ")); Log.println(rv > lv ? F("UPDATE AVAILABLE") : F("up to date"));
+
+  if (rv > lv)
+  {
+    g_updateAvailable = true;
+    g_latestVersion   = remote;
+  }
+}
+
+// Boot-time splash shown for 8 s when an update is available, so it's noticed at
+// power-on. Blocks only here (during setup); afterwards the info lives in RAM.
+void showUpdateBanner()
+{
+  if (!displayReady) return;
+  display.clearDisplay();
+  display.setFont(NULL);
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(0, 2);
+  display.println(F("Update available!"));
+  display.println();
+  display.print(F("New: ")); display.println(g_latestVersion);
+  display.print(F("Now: ")); display.println(FW_VERSION);
+  display.println();
+  display.print(F("Go to http://"));
+  display.print(WiFi.localIP());
+  display.print(F("/update"));
+  display.display();
+  delay(8000);
+}
+
+// Manual "check for update now" endpoint (also handy for testing). Runs the same
+// check as boot and reports the outcome.
+void handleCheckUpdate()
+{
+  checkFirmwareUpdate();
+
+  ChunkedResponse page;
+  page += F("<html><head><meta charset='UTF-8'></head><body><pre>");
+  page += String(F("installed : ")) + FW_VERSION + "\n";
+  page += String(F("latest    : ")) + (g_latestVersion.length() ? g_latestVersion : String(F("(check failed / unknown)"))) + "\n";
+  page += String(F("status    : ")) + (g_updateAvailable ? F("UPDATE AVAILABLE") : F("up to date")) + "\n";
+  page += F("</pre>");
+  if (g_updateAvailable) page += F("<p><a href='/update'>Go to firmware update</a></p>");
+  page += F("<p><a href='/'>Back to configuration</a></p></body></html>");
 }
 
 void handleConfigForm()
@@ -1150,6 +1461,7 @@ void handleConfigForm()
   // Existing fields
   bool   showSeconds = server.hasArg("showseconds"); // checkbox: present => true
   String units       = server.arg("units");          // "metric" or "imperial"
+  bool   pressMmhg   = (server.arg("pressunit") == "mmhg");   // pressure unit: hPa/mmHg
 
   // Display format fields
   bool   hidePlusTemp = server.hasArg("hideplus");   // checkbox: present => true
@@ -1283,6 +1595,7 @@ void handleConfigForm()
 
   config_showSeconds = showSeconds;
   config_imperial    = imperial;
+  config_pressure_mmhg = pressMmhg;
 
   config_hidePlusTemp = hidePlusTemp;
   config_time12h      = time12h;
@@ -1403,6 +1716,7 @@ void loadSettings()
     config_time12h      = false;
     config_dateUS       = false;
     config_showWeatherIcon = true;
+    config_pressure_mmhg   = false;
 
     config_netatmo_enabled       = false;
     config_netatmo_client_id     = "";
@@ -1455,6 +1769,7 @@ void loadSettings()
   // which is exactly the intended default for existing devices.
   uint8_t flags2 = EEPROM.read(ADDR_VARIABLES + 13);
   config_showWeatherIcon = (flags2 & (1 << 0)) != 0;
+  config_pressure_mmhg   = (flags2 & (1 << 2)) != 0;   // bit 1 is Netatmo (below)
 
   // --- Netatmo region (V2.0.0) ---
   if (sigCurrent)
@@ -1499,6 +1814,7 @@ void loadSettings()
   Log.print(F("Timezone manual: ")); Log.println(config_timezone_manual ? "true" : "false");
   Log.print(F("Show seconds: ")); Log.println(config_showSeconds ? "true" : "false");
   Log.print(F("Units imperial: ")); Log.println(config_imperial ? "true" : "false");
+  Log.print(F("Pressure mmHg: ")); Log.println(config_pressure_mmhg ? "true" : "false");
 
   // Display-format flags (previously read but not logged)
   Log.print(F("Hide + on positive temp: ")); Log.println(config_hidePlusTemp ? "true" : "false");
@@ -1604,6 +1920,7 @@ void saveSettings()
   uint8_t flags2 = 0;
   if (config_showWeatherIcon) flags2 |= (1 << 0);
   if (config_netatmo_enabled) flags2 |= (1 << 1);
+  if (config_pressure_mmhg)   flags2 |= (1 << 2);
   EEPROM.write(ADDR_VARIABLES + 13, flags2);
 
   // Netatmo credentials region (V2.0.0)
@@ -1676,6 +1993,40 @@ bool netatmoUpdateReadings(NetatmoReadings &out)
   return true;
 }
 
+// --- Pressure display unit --------------------------------------------------
+// Netatmo and metric wttr.in report hPa; the user can opt to show mmHg instead
+// (1 hPa = 0.750061683 mmHg). Imperial wttr.in returns inHg, left untouched — the
+// mmHg option only rewrites hPa values.
+static const float HPA_TO_MMHG = 0.750061683f;
+
+// Format an hPa value as the configured unit string, e.g. "1014hPa" / "761mmHg".
+static String formatPressureHpa(float hpa)
+{
+  if (config_pressure_mmhg)
+    return String((int)lroundf(hpa * HPA_TO_MMHG)) + "mmHg";
+  return String((int)lroundf(hpa)) + "hPa";
+}
+
+// Pull the leading numeric value out of a string like "1014hPa" -> 1014.0.
+// Returns false if there are no digits (e.g. "N/A").
+static bool parseLeadingFloat(const String &s, float &out)
+{
+  String num;
+  bool any = false, dot = false;
+  for (size_t i = 0; i < s.length(); i++)
+  {
+    char c = s[i];
+    if (c >= '0' && c <= '9')            { num += c; any = true; }
+    else if ((c == '-' || c == '+') && !any && num.length() == 0) num += c;
+    else if (c == '.' && !dot)           { num += c; dot = true; }
+    else if (c == ' ' && !any)           continue;   // skip leading spaces
+    else break;
+  }
+  if (!any) return false;
+  out = num.toFloat();
+  return true;
+}
+
 // Overlay Netatmo temp/humidity/pressure on top of the wttr.in result. Condition,
 // icon code and sun times are left as wttr.in provided them. On any Netatmo failure
 // the wttr.in values are kept untouched. Netatmo returns values in the account's
@@ -1709,7 +2060,7 @@ void applyNetatmoOverlay()
     weather_temp = b;
   }
   if (nr.haveHum)   weather_hum   = String(nr.hum) + "%";
-  if (nr.havePress) weather_press = String((int)lroundf(nr.pressure)) + "hPa";
+  if (nr.havePress) weather_press = formatPressureHpa(nr.pressure);
 
   Log.print(F("[netatmo] overlay applied from '")); Log.print(nr.station);
   Log.print(F("' / '")); Log.print(nr.module); Log.println(F("'"));
@@ -1721,6 +2072,28 @@ static const unsigned char PROGMEM netatmoOkIcon[8] =
   0x18, 0x3C, 0x7E, 0xFF, 0xFF, 0xFF, 0xC3, 0x81
 };
 
+// 8x8 heart, two frames: diastole (small, 6px) and systole (big, 8px). Alternated
+// to fake a heartbeat as the "firmware update available" indicator (top-left).
+static const unsigned char PROGMEM heartSmall[8] = { 0x00, 0x66, 0x7E, 0x7E, 0x3C, 0x18, 0x00, 0x00 };
+static const unsigned char PROGMEM heartBig[8]   = { 0x66, 0xFF, 0xFF, 0xFF, 0x7E, 0x3C, 0x18, 0x00 };
+
+// Heartbeat waveform: a "lub-dub" double thump then a rest, over a 1 s cycle.
+// true => show the big (systole) frame. Also fed into computeFrameSig() so the
+// change-only redraw actually animates it — but ONLY while an update is pending.
+static bool heartBeatBig()
+{
+  uint32_t p = millis() % 1000;                 // 1 s cycle
+  return (p < 120) || (p >= 240 && p < 360);    // lub ... dub ... (rest)
+}
+
+// "Update available" beating heart, top-left. Drawn on both screens (unconditional,
+// independent of the right-side status-icon title gate) so it's always visible.
+void drawUpdateHeart()
+{
+  if (!g_updateAvailable) return;
+  display.drawBitmap(0, 0, heartBeatBig() ? heartBig : heartSmall, 8, 8, SSD1306_WHITE);
+}
+
 // Top-of-screen status icons for the clock screen only: a 4-bar WiFi signal
 // meter at the very top-right, and just to its left a Netatmo status mark — the
 // "OK" glyph when the last update succeeded, or a "!" when it failed. Drawn at
@@ -1728,15 +2101,7 @@ static const unsigned char PROGMEM netatmoOkIcon[8] =
 void drawTopStatusIcons()
 {
   // --- WiFi signal meter: 4 ascending bars, the strongest N filled ---
-  int bars = 0;
-  if (WiFi.status() == WL_CONNECTED)
-  {
-    long rssi = WiFi.RSSI();
-    if      (rssi >= -55) bars = 4;
-    else if (rssi >= -65) bars = 3;
-    else if (rssi >= -72) bars = 2;
-    else                  bars = 1;   // connected but weak
-  }
+  int bars = wifiBars();
   const int bw = 2, gap = 1, baseY = 8;
   const int x0 = 128 - (4 * bw + 3 * gap);   // right-aligned (= 117)
   for (int i = 0; i < 4; i++)
@@ -1816,11 +2181,11 @@ uint8_t lastBrightness_ = 0;
 
 uint8_t calculateDisplayBrightness()
 {
-  uint8_t brightness = calculateDisplayBrightness_d(false);
+  uint8_t brightness = computeBrightness(false);
   if(brightness != lastBrightness_)
   {
     lastBrightness_ = brightness;
-    //calculateDisplayBrightness_d(true);
+    //computeBrightness(true);
     Log.print("Calculated Brightness: ");
     Log.println(brightness);
   }
@@ -1886,7 +2251,11 @@ static void resolveSunWindow(time_t &nowEpoch, time_t &dawnE, time_t &riseE,
   if (duskE >= todayStartsSec + SEC_PER_DAY) duskE -= SEC_PER_DAY;
 }
 
-uint8_t calculateDisplayBrightness_d(bool debug)
+// Worker that actually computes the brightness for "now" from the sun window
+// (dawn ramp -> day plateau -> dusk ramp -> night). `debug` logs the resolved sun
+// times. calculateDisplayBrightness() is the public accessor that caches this and
+// logs only on change.
+uint8_t computeBrightness(bool debug)
 {
   if (config_variableContrast == false)
     return 255;
@@ -2155,6 +2524,7 @@ void drawTimeScreen()
 
   // WiFi-strength meter + Netatmo "!" at the top, by the day-of-week row.
   drawTopStatusIcons();
+  drawUpdateHeart();   // beating heart (top-left) when an update is available
 
   display.display();
 }
@@ -2172,6 +2542,47 @@ static bool isNightNow()
   return !inRangeWrap(nowEpoch, riseE, setE);
 }
 
+// Width in pixels of a string in the classic font.
+static int classicTextWidth(const String &s)
+{
+  int16_t x1, y1; uint16_t w, h;
+  display.setFont(NULL);
+  display.getTextBounds(s, 0, 0, &x1, &y1, &w, &h);
+  return (int)w;
+}
+
+// Choose the weather-screen title and whether the top-right status icons fit.
+// The title is centered and the icons live in the top-right corner ([iconLeft..127]).
+// If the centered title would reach the icons we first drop the country part
+// (everything after the first comma); if it still collides we skip the icons; and
+// if the title is wider than the whole screen we truncate it to fit.
+static void weatherTitleAndIcons(String &name, bool &drawIcons)
+{
+  name = config_city;
+  drawIcons = true;
+
+  const int iconLeft = config_netatmo_enabled ? 107 : 117;  // matches drawTopStatusIcons()
+  const int gap = 3;
+  // A centered string of width w spans [(128-w)/2 .. (128+w)/2]; it clears the
+  // icons when its right edge (128+w)/2 <= iconLeft-gap, i.e. w <= maxW.
+  const int maxW = 2 * (iconLeft - gap) - 128;
+
+  if (classicTextWidth(name) > maxW)
+  {
+    int comma = name.indexOf(',');           // "City, Country" -> keep "City"
+    if (comma > 0)
+    {
+      String shortName = name.substring(0, comma);
+      shortName.trim();
+      name = shortName;
+    }
+    if (classicTextWidth(name) > maxW) drawIcons = false;  // still too wide -> no icons
+  }
+  // If the title is wider than the whole screen, truncate it to fit.
+  while (name.length() > 0 && classicTextWidth(name) > 128)
+    name.remove(name.length() - 1);
+}
+
 void drawWeatherScreen()
 {
   if (!displayInitialized)
@@ -2184,11 +2595,13 @@ void drawWeatherScreen()
 
   int16_t x1, y1; uint16_t w, h;
 
-  // Top center: city name
+  // Top center: city name (shortened if needed; status icons drawn later iff they fit)
+  String title; bool showStatusIcons;
+  weatherTitleAndIcons(title, showStatusIcons);
   display.setFont(NULL);
-  display.getTextBounds(config_city, 0, 0, &x1, &y1, &w, &h);
+  display.getTextBounds(title, 0, 0, &x1, &y1, &w, &h);
   display.setCursor((128 - w) / 2, 0);
-  display.print(config_city);
+  display.print(title);
 
   bool haveTemp = (weather_valid && weather_temp != "N/A");
   // Pick an icon only if enabled, weather is valid, and the code maps to one.
@@ -2278,6 +2691,10 @@ void drawWeatherScreen()
 
   // Full-width separator line near the bottom.
   display.drawFastHLine(0, 52, 128, SSD1306_WHITE);
+
+  // WiFi meter + Netatmo mark, but only if the city title left room for them.
+  if (showStatusIcons) drawTopStatusIcons();
+  drawUpdateHeart();   // beating heart (top-left) when an update is available
 
   display.display();
 }
@@ -2514,7 +2931,14 @@ bool getWeather()
   weather_cond = condStr;
   weather_hum = humStr;
   weather_wind = windStr;
+  // Metric wttr.in gives hPa: re-format it through the configured unit (hPa/mmHg).
+  // Imperial gives inHg, which we leave exactly as received (mmHg is hPa-only).
   weather_press = pressStr;
+  if (!config_imperial)
+  {
+    float hpa;
+    if (parseLeadingFloat(pressStr, hpa)) weather_press = formatPressureHpa(hpa);
+  }
   weather_code = codeStr.toInt();   // WWO condition code, used to pick the icon
   Log.print(F("Code=")); Log.println(weather_code);
 

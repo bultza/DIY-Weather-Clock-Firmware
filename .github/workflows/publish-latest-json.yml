@@ -1,0 +1,49 @@
+name: Publish latest.json
+
+# Keeps firmware/latest.json in sync with FW_VERSION so we never forget to bump it
+# by hand: the single source of truth is the #define in the sketch. Runs only on
+# main (the release branch); develop is managed manually while testing.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'DIY-Weather-Clock-Firmware.ino'
+  workflow_dispatch:      # allow a manual re-sync from the Actions tab
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract FW_VERSION and write firmware/latest.json
+        run: |
+          set -euo pipefail
+          VER=$(grep -oP '#define\s+FW_VERSION\s+"\K[^"]+' DIY-Weather-Clock-Firmware.ino)
+          if [ -z "$VER" ]; then echo "FW_VERSION not found"; exit 1; fi
+          echo "FW_VERSION=$VER"
+          mkdir -p firmware
+          cat > firmware/latest.json <<EOF
+          {
+            "version": "$VER",
+            "url": "https://github.com/${GITHUB_REPOSITORY}/releases",
+            "notes": "Published automatically from FW_VERSION"
+          }
+          EOF
+          cat firmware/latest.json
+
+      - name: Commit if changed
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- firmware/latest.json; then
+            echo "latest.json already up to date; nothing to commit."
+          else
+            git config user.name  "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add firmware/latest.json
+            git commit -m "chore: sync firmware/latest.json to FW_VERSION [skip ci]"
+            git push
+          fi

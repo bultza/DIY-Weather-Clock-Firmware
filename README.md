@@ -12,11 +12,6 @@ or AliExpress. The kit includes a plexiglass structure and three PCB boards:
 <br/>Clock Face on the left, Weather face on the right
 </div>
 
-<div align="center">
-<img src="tools/screen_sim/screens.png" alt="Different possible Weather faces samples" width="80%"/>
-<br/>Different Faces examples showing different possible customizations
-</div>
-
 ## Why
 This kit already ships with a ready-to-use firmware, but it requires registering
 on an external website and you have no real control over what the firmware does
@@ -31,6 +26,13 @@ modified and cleaned up to:
 - add proper configuration and robustness
 - support metric / imperial units
 - support real automatic daylight-saving time (DST)
+- support weather icons
+- support for **Netatmo** weather stations (this is optional)
+
+<div align="center">
+<img src="tools/screen_sim/screens.png" alt="Different possible Weather faces samples" width="80%"/>
+<br/>Different Faces examples showing different possible customizations
+</div>
 
 ## How it works
 
@@ -45,6 +47,7 @@ If the signature is not found:
   - City (used for weather)
   - Timezone (preset or manual)
   - Metric / imperial units
+  - Pressure unit (hPa or mmHg)
   - Seconds display
   - Optionally, a **Netatmo** weather station (see the Netatmo section below)
 
@@ -59,16 +62,18 @@ Once configured and rebooted:
 - Timezone handling uses proper DST rules (not fixed offsets)
 - Weather data is retrieved from wttr.in every 15 minutes
 - If Netatmo is enabled, the outdoor temperature/humidity and pressure are taken
-  from your own station instead (the condition, icon and sun times still come
+  from your own station instead, also every 15 minutes (the condition, icon and sun times still come
   from wttr.in)
-- The configuration web portal stays available at the device's IP (shown on the
-  OLED at boot), so you can reconfigure it from a browser at any time — no need
+- The configuration web portal stays available at the device's **IP (shown on the OLED at boot for 8 seconds)**, so you can reconfigure it from a browser at any time — no need
   to force AP mode or re-flash
 - The device's serial log is kept in a small RAM buffer and can be viewed from a
-  web page, so you can debug the clock over Wi-Fi without a serial cable
+  web page, so you can debug the clock over Wi-Fi without a serial cable.
 - Firmware can be updated over the air (OTA): once it is running, you can upload a
   new `.bin` from a browser at `http://<device-ip>/update`, so you only need the
   USB/FTDI cable for the very first flash
+- On boot (and once a day) the clock checks GitHub for a newer firmware version and
+  lets you know if one is available (see the update-notification section below); it
+  never flashes anything on its own
 
 Every 15 seconds the display toggles between:
 - Clock view
@@ -83,6 +88,7 @@ automatically without rebooting.
 ## Changes from the original firmware
 
 - Metric / Imperial units selection
+- Pressure display in **hPa or mmHg** (handy where mmHg is the norm, e.g. Russia)
 - Proper timezone handling with automatic DST
 - Optional seconds display
 - Support for cities with spaces and special characters
@@ -96,6 +102,8 @@ automatically without rebooting.
 - Status icons on the clock screen: a Wi-Fi signal meter and a Netatmo health mark
 - Serial log viewable from a web page (remote debugging without a cable)
 - Over-the-air (OTA) firmware updates from a web page (no cable after the first flash)
+- Automatic **update notification**: the clock checks GitHub for a newer version and
+  tells you (on the OLED, with a beating-heart icon, and on the config page)
 - More predictable behavior
 
 
@@ -110,7 +118,7 @@ from wttr.in — Netatmo doesn't provide those — so the two work together.
 
 If Netatmo is unreachable, the clock automatically falls back to the wttr.in
 values, and the clock screen shows a small `!` next to the Wi-Fi meter (it shows
-a Netatmo "OK" mark when the last update succeeded).
+a Netatmo "OK" (Netatmo icon) mark when the last update succeeded).
 
 ### One-time setup at Netatmo
 
@@ -142,7 +150,9 @@ device's IP afterwards) and:
 
 Notes:
 - **Units:** Netatmo returns values in your Netatmo account's unit setting, used
-  as-is. Set your Netatmo account to the same units (°C / °F, mbar) as the clock.
+  as-is. Set your Netatmo account to the same temperature units (°C / °F) as the
+  clock, and its pressure to **mbar** (= hPa) — the clock then shows it in hPa or
+  mmHg according to the **Pressure unit** option, whichever the source.
 - For security the three credentials are **never shown back** in the portal:
   leave a field blank to keep the stored value, or type a new value to replace
   it (the Wi-Fi password works the same way).
@@ -236,11 +246,36 @@ You can use OTA only if you managed to update the firmware beforehand already. Y
 > :warning: The very first flash must still be done over the USB/FTDI cable — the
 > factory firmware does not have the OTA update page.
 
+### Update notifications
+
+The clock can tell you when a newer firmware is available so you don't have to
+check by hand. Right after boot (once the first weather data is in) and then once
+every 24 hours, it fetches a tiny [`firmware/latest.json`](firmware/latest.json)
+from this GitHub repo over HTTPS and compares its version with the one running.
+
+If a newer version exists, it lets you know in three places:
+
+- an **8-second notice on the OLED at boot**, showing the new version and the
+  device's `http://<ip>/update` address;
+- a **beating-heart icon** in the top-left corner of both the clock and weather
+  screens;
+- a **red banner** at the top of the configuration web page, with an *Update now*
+  link straight to the `/update` page.
+
+It **never flashes anything by itself** — updating is always your manual OTA
+(upload the new `.bin` at `/update`). `latest.json` is published automatically
+from the firmware version on each release, so it always reflects the latest build.
+
 ## Tools
 
-The [`tools/icon_sim/`](tools/icon_sim/README.md) folder has a small Python tool to
-preview the weather icons and regenerate `weather_icons.h` — it is not part of the
-firmware build.
+Two small Python helpers live under [`tools/`](tools/) and are **not** part of the
+firmware build:
+
+- [`tools/icon_sim/`](tools/icon_sim/README.md) — preview the weather icons and
+  regenerate `weather_icons.h`.
+- [`tools/screen_sim/`](tools/screen_sim/README.md) — a bit-for-bit simulator of the
+  128×64 OLED that mirrors both screens (icons, status marks, the update heart…),
+  so you can preview layout changes without flashing hardware.
 
 ## Resources
 - Original firmware and inspiration: https://www.whynot.org.ua/en/electronic-kits/hu-061-diy-kit-wi-fi-weather-forecast-clock
