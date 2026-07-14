@@ -249,6 +249,25 @@ String weather_sundusk = "19:30";
 static const uint32_t REBOOT_AFTER_MS = 49UL * 24UL * 60UL * 60UL * 1000UL;
 bool rebootIn10mins = false;
 
+// --- Firmware update check ---------------------------------------------------
+// At boot (after the first wttr.in + Netatmo pull) the clock fetches a tiny JSON
+// from the GitHub repo and compares its "version" against FW_VERSION. GitHub is
+// served over TLS 1.2 (which BearSSL can do, unlike wttr.in's TLS 1.3); it does
+// NOT offer MFLN, and a 16 KB RX buffer won't fit our fragmented heap, but an
+// 8 KB buffer holds Fastly's TLS records (verified on-device). No auto-flashing:
+// we only surface "an update is available".
+//
+// TEMP: pointing at the 'develop' branch so we can test end-to-end before 'main'
+// has firmware/latest.json. Switch 'develop' -> 'main' for the real release.
+static const char UPDATE_JSON_HOST[] = "raw.githubusercontent.com";
+static const char UPDATE_JSON_URL[]  =
+  "https://raw.githubusercontent.com/bultza/DIY-Weather-Clock-Firmware/develop/firmware/latest.json";
+
+bool   g_updateAvailable = false;   // set by checkFirmwareUpdate()
+String g_latestVersion   = "";      // remote version string when newer than ours
+uint32_t lastUpdateCheckMs = 0;     // millis() of the last check (boot + every 24 h)
+static const unsigned long UPDATE_CHECK_INTERVAL_MS = 24UL * 60UL * 60UL * 1000UL;
+
 // Function prototypes:
 void loadSettings();
 void saveSettings();
@@ -258,6 +277,9 @@ void handleConfigForm();
 void handleLog();
 void handleForceWeather();
 void handleCredits();
+void handleCheckUpdate();                          // manual "check for firmware update now"
+void checkFirmwareUpdate();                        // fetch latest.json, compare to FW_VERSION
+void showUpdateBanner();                           // boot splash when an update is available
 void drawTimeScreen();
 void drawWeatherScreen();
 bool getWeather();
@@ -270,6 +292,8 @@ uint8_t calculateDisplayBrightness();
 bool netatmoUpdateReadings(NetatmoReadings &out);  // refresh token if needed + fetch
 void applyNetatmoOverlay();                        // overlay Netatmo values on weather_*
 void drawTopStatusIcons();                         // WiFi meter + Netatmo "!" on the clock screen
+void drawUpdateHeart();                            // beating heart when a firmware update is available
+static bool heartBeatBig();                         // heartbeat waveform (used by computeFrameSig too)
 
 void setup() 
 {
@@ -441,6 +465,11 @@ void setup()
     Log.println(F("Initial weather fetch failed."));
   }
 
+  // After the first weather + Netatmo pull, ask GitHub whether a newer firmware
+  // exists. Sets g_updateAvailable / g_latestVersion (no auto-flash).
+  checkFirmwareUpdate();
+  lastUpdateCheckMs = millis();   // schedule the next automatic re-check 24 h later
+
   // Make sure the portal IP stayed readable for at least 8 s. The NTP and
   // weather work above already ate part of that time, so only wait for the
   // remainder (if any) instead of blocking a full 8 s.
@@ -449,6 +478,11 @@ void setup()
     unsigned long elapsed = millis() - ipShownAt;
     if (elapsed < 8000) delay(8000 - elapsed);
   }
+
+  // If an update is available, extend the boot by 8 s showing it on the OLED so
+  // it's noticed at power-on (this is the only place it blocks; normal operation
+  // just surfaces it in the web portal / status icon later).
+  if (g_updateAvailable) showUpdateBanner();
 }
 
 // WiFi signal strength as 0-4 bars (also used by the frame signature). Quantized,
@@ -501,6 +535,9 @@ static uint32_t computeFrameSig()
   h = fnvByte(h, (uint8_t)weather_code);
 
   h = fnvByte(h, (uint8_t)wifiBars());
+  // Only perturb the signature (forcing the change-only redraw to animate) while
+  // an update is pending, so the beating heart costs nothing the rest of the time.
+  if (g_updateAvailable) h = fnvByte(h, heartBeatBig() ? 1 : 0);
   uint8_t nstat = config_netatmo_enabled
                     ? (netatmoConsecFails > 0 ? 2 : (netatmoLastAttemptOk ? 1 : 3))
                     : 0;
@@ -579,6 +616,16 @@ void loop()
         }
       }
     }
+  }
+
+  // Re-check GitHub for a newer firmware once every 24 h. Only updates the flag
+  // (which the web portal's red banner reflects); it does NOT pop the OLED banner
+  // mid-operation — that would interrupt the clock. ~1 s blocking TLS fetch.
+  if (now - lastUpdateCheckMs > UPDATE_CHECK_INTERVAL_MS)
+  {
+    lastUpdateCheckMs = now;
+    Log.println(F("[update] 24h periodic re-check..."));
+    checkFirmwareUpdate();
   }
 
   // Draw the appropriate screen, but only when the visible content changed —
@@ -790,6 +837,17 @@ void beginWebServer()
     page += "<p style='text-align:center;margin:-8px 0 16px;font-size:13px;color:#666;'>Firmware ";
     page += FW_VERSION;
     page += " &middot; <a href='https://github.com/bultza/DIY-Weather-Clock-Firmware' target='_blank'>Project page</a></p>";
+
+    // Red "new firmware available" banner (set by checkFirmwareUpdate()).
+    if (g_updateAvailable)
+    {
+      page += "<div style='margin:0 0 16px;padding:12px;border-radius:8px;background:#ffebee;border:1px solid #f44336;color:#b71c1c;text-align:center;font-size:14px;'>";
+      page += "&#9888; New firmware available: <b>";
+      page += htmlEscape(g_latestVersion);
+      page += "</b> (installed " FW_VERSION "). <a href='/update' style='color:#b71c1c;font-weight:bold;'>Update now</a>";
+      page += "</div>";
+    }
+
     page += "<form id='cfgform' method='POST' action='/'>";
 
     // WiFi SSID field
@@ -1168,6 +1226,7 @@ void beginWebServer()
   server.on("/log", HTTP_GET, handleLog);
   server.on("/forceweather", HTTP_GET, handleForceWeather);
   server.on("/credits", HTTP_GET, handleCredits);
+  server.on("/checkupdate", HTTP_GET, handleCheckUpdate);   // TEMP: GitHub TLS 1.2 probe
   // Serve our own /update page (firmware only) BEFORE httpUpdater.setup(), so this
   // GET handler wins (first match) and the stock page -- which also offers a
   // confusing "FileSystem" upload -- is never shown. The updater still handles the
@@ -1251,6 +1310,129 @@ void handleCredits()
   page += "<li>Original firmware / inspiration: <a href='https://www.whynot.org.ua/en/electronic-kits/hu-061-diy-kit-wi-fi-weather-forecast-clock' target='_blank'>WHYNOT blog (HU-061 kit)</a></li>";
   page += "</ul><p><a href='/'>&larr; Back to configuration</a></p>";
   page += "</div></body></html>";
+}
+
+// Turn a version string ("V2.0.3", "2.0.3", "v2.0") into a single comparable
+// number, MMMmmmppp (major*1e6 + minor*1e3 + patch). Any non-digit (like the
+// leading 'V') is ignored; missing components default to 0. Comparing the numbers
+// tells us "remote is newer" rather than merely "different" (avoids downgrades).
+static uint32_t parseVersion(const String &v)
+{
+  uint16_t part[3] = { 0, 0, 0 };
+  uint8_t  idx     = 0;
+  bool     inNum   = false;
+  for (size_t i = 0; i < v.length() && idx < 3; i++)
+  {
+    char c = v[i];
+    if (c >= '0' && c <= '9') { part[idx] = part[idx] * 10 + (c - '0'); inNum = true; }
+    else if (c == '.' && inNum) { idx++; inNum = false; }
+    // any other character (e.g. the leading 'V') is skipped
+  }
+  return (uint32_t)part[0] * 1000000UL + (uint32_t)part[1] * 1000UL + part[2];
+}
+
+// Extract a JSON  "key" : "value"  tolerating whitespace around the colon. We do
+// NOT reuse netatmo.h's njsonStr here: that one assumes compact output ("k":"v")
+// because Netatmo's API is compact, but a hand-/tool-written latest.json is often
+// pretty-printed ("version": "V2.0.3"), which njsonStr would miss.
+static String jsonQuotedValue(const String &s, const char *key)
+{
+  String needle = String('"') + key + '"';
+  int p = s.indexOf(needle);
+  if (p < 0) return "";
+  p += needle.length();
+  while (p < (int)s.length() && (s[p] == ' ' || s[p] == '\t' || s[p] == '\n' || s[p] == '\r')) p++;
+  if (p >= (int)s.length() || s[p] != ':') return "";
+  p++;
+  while (p < (int)s.length() && (s[p] == ' ' || s[p] == '\t' || s[p] == '\n' || s[p] == '\r')) p++;
+  if (p >= (int)s.length() || s[p] != '"') return "";
+  p++;
+  int e = s.indexOf('"', p);
+  if (e < 0) return "";
+  return s.substring(p, e);
+}
+
+// Fetch firmware/latest.json from GitHub over HTTPS and compare its "version"
+// against FW_VERSION. Sets g_updateAvailable / g_latestVersion. GitHub speaks
+// TLS 1.2 (BearSSL can) but offers no MFLN; an 8 KB RX buffer holds Fastly's TLS
+// records within our fragmented heap (a 16 KB one does not). No auto-flashing.
+void checkFirmwareUpdate()
+{
+  g_updateAvailable = false;
+  g_latestVersion   = "";
+
+  Log.println(F("[update] checking GitHub for newer firmware..."));
+  BearSSL::WiFiClientSecure client;
+  client.setInsecure();              // no cert validation, same policy as Netatmo
+  client.setBufferSizes(8192, 512);  // proven on-device: fits Fastly TLS + our heap
+
+  HTTPClient http; http.setReuse(false);
+  http.useHTTP10(true);              // un-chunked body, clean getString()
+  if (!http.begin(client, UPDATE_JSON_URL))
+  {
+    Log.println(F("[update] begin() failed"));
+    return;
+  }
+  int code = http.GET();
+  Log.print(F("[update] HTTP ")); Log.println(code);
+  if (code != 200) { http.end(); return; }
+
+  String payload = http.getString();
+  http.end();
+
+  String remote = jsonQuotedValue(payload, "version");   // whitespace-tolerant
+  remote.trim();
+  if (remote.length() == 0) { Log.println(F("[update] response missing 'version'")); return; }
+
+  uint32_t rv = parseVersion(remote);
+  uint32_t lv = parseVersion(FW_VERSION);
+  Log.print(F("[update] local=")); Log.print(FW_VERSION);
+  Log.print(F(" remote=")); Log.print(remote);
+  Log.print(F(" -> ")); Log.println(rv > lv ? F("UPDATE AVAILABLE") : F("up to date"));
+
+  if (rv > lv)
+  {
+    g_updateAvailable = true;
+    g_latestVersion   = remote;
+  }
+}
+
+// Boot-time splash shown for 8 s when an update is available, so it's noticed at
+// power-on. Blocks only here (during setup); afterwards the info lives in RAM.
+void showUpdateBanner()
+{
+  if (!displayReady) return;
+  display.clearDisplay();
+  display.setFont(NULL);
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(0, 2);
+  display.println(F("Update available!"));
+  display.println();
+  display.print(F("New: ")); display.println(g_latestVersion);
+  display.print(F("Now: ")); display.println(FW_VERSION);
+  display.println();
+  display.print(F("Go to http://"));
+  display.print(WiFi.localIP());
+  display.print(F("/update"));
+  display.display();
+  delay(8000);
+}
+
+// Manual "check for update now" endpoint (also handy for testing). Runs the same
+// check as boot and reports the outcome.
+void handleCheckUpdate()
+{
+  checkFirmwareUpdate();
+
+  ChunkedResponse page;
+  page += F("<html><head><meta charset='UTF-8'></head><body><pre>");
+  page += String(F("installed : ")) + FW_VERSION + "\n";
+  page += String(F("latest    : ")) + (g_latestVersion.length() ? g_latestVersion : String(F("(check failed / unknown)"))) + "\n";
+  page += String(F("status    : ")) + (g_updateAvailable ? F("UPDATE AVAILABLE") : F("up to date")) + "\n";
+  page += F("</pre>");
+  if (g_updateAvailable) page += F("<p><a href='/update'>Go to firmware update</a></p>");
+  page += F("<p><a href='/'>Back to configuration</a></p></body></html>");
 }
 
 void handleConfigForm()
@@ -1836,6 +2018,28 @@ static const unsigned char PROGMEM netatmoOkIcon[8] =
   0x18, 0x3C, 0x7E, 0xFF, 0xFF, 0xFF, 0xC3, 0x81
 };
 
+// 8x8 heart, two frames: diastole (small, 6px) and systole (big, 8px). Alternated
+// to fake a heartbeat as the "firmware update available" indicator (top-left).
+static const unsigned char PROGMEM heartSmall[8] = { 0x00, 0x66, 0x7E, 0x7E, 0x3C, 0x18, 0x00, 0x00 };
+static const unsigned char PROGMEM heartBig[8]   = { 0x66, 0xFF, 0xFF, 0xFF, 0x7E, 0x3C, 0x18, 0x00 };
+
+// Heartbeat waveform: a "lub-dub" double thump then a rest, over a 1 s cycle.
+// true => show the big (systole) frame. Also fed into computeFrameSig() so the
+// change-only redraw actually animates it — but ONLY while an update is pending.
+static bool heartBeatBig()
+{
+  uint32_t p = millis() % 1000;                 // 1 s cycle
+  return (p < 120) || (p >= 240 && p < 360);    // lub ... dub ... (rest)
+}
+
+// "Update available" beating heart, top-left. Drawn on both screens (unconditional,
+// independent of the right-side status-icon title gate) so it's always visible.
+void drawUpdateHeart()
+{
+  if (!g_updateAvailable) return;
+  display.drawBitmap(0, 0, heartBeatBig() ? heartBig : heartSmall, 8, 8, SSD1306_WHITE);
+}
+
 // Top-of-screen status icons for the clock screen only: a 4-bar WiFi signal
 // meter at the very top-right, and just to its left a Netatmo status mark — the
 // "OK" glyph when the last update succeeded, or a "!" when it failed. Drawn at
@@ -2266,6 +2470,7 @@ void drawTimeScreen()
 
   // WiFi-strength meter + Netatmo "!" at the top, by the day-of-week row.
   drawTopStatusIcons();
+  drawUpdateHeart();   // beating heart (top-left) when an update is available
 
   display.display();
 }
@@ -2435,6 +2640,7 @@ void drawWeatherScreen()
 
   // WiFi meter + Netatmo mark, but only if the city title left room for them.
   if (showStatusIcons) drawTopStatusIcons();
+  drawUpdateHeart();   // beating heart (top-left) when an update is available
 
   display.display();
 }

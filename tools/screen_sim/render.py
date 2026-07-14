@@ -58,6 +58,23 @@ def icon_for_code(code, night):
 # 8x8 "Netatmo OK" glyph — identical bytes to netatmoOkIcon[] in the firmware.
 NETATMO_OK_ICON = [0x18, 0x3C, 0x7E, 0xFF, 0xFF, 0xFF, 0xC3, 0x81]
 
+# 8x8 heart, two frames — identical bytes to heartSmall[]/heartBig[] in the
+# firmware. Alternated (lub-dub) as the "firmware update available" indicator.
+HEART_SMALL = [0x00, 0x66, 0x7E, 0x7E, 0x3C, 0x18, 0x00, 0x00]
+HEART_BIG   = [0x66, 0xFF, 0xFF, 0xFF, 0x7E, 0x3C, 0x18, 0x00]
+
+
+def draw_update_heart(d, heart):
+    """Mirror drawUpdateHeart(): a beating heart, top-left, when an update exists.
+
+    heart: None (nothing), "small" (diastole / rest) or "big" (systole / beat).
+    The firmware animates between the two on a lub-dub rhythm; here we render a
+    chosen frame since the sim is a single still.
+    """
+    if not heart:
+        return
+    d.bitmap(0, 0, HEART_BIG if heart == "big" else HEART_SMALL, 8, 8)
+
 
 def draw_status_icons(d, wifi_bars, netatmo):
     """Mirror drawTopStatusIcons(): top-right WiFi meter + Netatmo mark.
@@ -90,9 +107,10 @@ def draw_status_icons(d, wifi_bars, netatmo):
 # --------------------------------------------------------------------------
 def time_screen(day_name, hh, mm, ss=None, ampm=None,
                 temp_line="N/A", date_str="04/06/2026",
-                wifi_bars=4, netatmo=None):
+                wifi_bars=4, netatmo=None, heart=None):
     """ss/ampm None => not shown. temp_line is the full bottom-left string.
-    wifi_bars (0-4) and netatmo (None/"ok"/"error") drive the top status icons."""
+    wifi_bars (0-4) and netatmo (None/"ok"/"error") drive the top status icons.
+    heart (None/"small"/"big") draws the update indicator, top-left."""
     d = Display()
     show_seconds = ss is not None
     show_12h = ampm is not None
@@ -149,14 +167,16 @@ def time_screen(day_name, hh, mm, ss=None, ampm=None,
 
     d.hline(0, 52, 128)
     draw_status_icons(d, wifi_bars, netatmo)
+    draw_update_heart(d, heart)
     return d
 
 
 # --------------------------------------------------------------------------
 # Screen 2: the weather face  (drawWeatherScreen)
 # --------------------------------------------------------------------------
-def weather_screen(city, temp_num, unit, cond, bottom, code=None, night=False):
-    """code None => no icon. temp_num/unit None => N/A state."""
+def weather_screen(city, temp_num, unit, cond, bottom, code=None, night=False, heart=None):
+    """code None => no icon. temp_num/unit None => N/A state.
+    heart (None/"small"/"big") draws the update indicator, top-left."""
     d = Display()
     have_temp = temp_num is not None
 
@@ -218,6 +238,7 @@ def weather_screen(city, temp_num, unit, cond, bottom, code=None, night=False):
         d.print(bottom)
 
     d.hline(0, 52, 128)
+    draw_update_heart(d, heart)
     return d
 
 
@@ -263,6 +284,21 @@ def montage(items):
 
 def examples():
     out = []
+    # --- Firmware-update heartbeat indicator (top-left), both beat frames ---
+    out.append(("Update heart BIG (systole/beat) - clock",
+                time_screen("Wednesday", 14, 9,
+                            temp_line="+22" + DEG + "C 55%", date_str="04/06/2026",
+                            wifi_bars=4, netatmo="ok", heart="big")))
+    out.append(("Update heart small (diastole/rest) - clock",
+                time_screen("Wednesday", 14, 9,
+                            temp_line="+22" + DEG + "C 55%", date_str="04/06/2026",
+                            wifi_bars=4, netatmo="ok", heart="small")))
+    out.append(("Update heart BIG (beat) - weather",
+                weather_screen("Madrid", "22", "C", "Sunny",
+                               "H:40% 12km/h 1014hPa", code=113, night=False, heart="big")))
+    out.append(("Update heart small (rest) - weather",
+                weather_screen("Bilbao", "14", "C", "Light rain",
+                               "H:88% 20km/h 1008hPa", code=296, night=False, heart="small")))
     # --- Clock faces (top-right: WiFi meter + Netatmo mark) ---
     out.append(("Clock 24h, WiFi full + Netatmo OK",
                 time_screen("Wednesday", 14, 9,
