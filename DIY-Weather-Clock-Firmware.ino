@@ -24,9 +24,9 @@
  * Note: Uses custom fonts (FreeMonoBold18pt7b for time, FreeMonoBold12pt7b for temperature).
  * All other text uses default font. Display is rotated 180 degrees (setRotation(2)).
  * 
- * PB Aug 26 2026: Replaced wttr.in as data was incorrect by open-meteo.com 
- * Added a 4-day forecast from open-meteo.com.
- * Position is hard-coded in the code for now, but could be made configurable in the future.
+ * PB Aug 26 2026: Replaced wttr.in by open-meteo.com as wttr.in was sending incorrect data.
+ * Added a 4-day forecast functions screen
+ * Position is now a configurable value (lat/lon) on the setup screen instead of a hardcoded location 
  * 
  */
 #include <EEPROM.h>
@@ -50,8 +50,7 @@
 enum ForecastIconClass { FI_CLEAR, FI_PARTCLOUD, FI_CLOUD, FI_RAIN, FI_SNOW, FI_THUNDER, FI_FOG };
 
 // Firmware version (bump this on each release)
-//#define FW_VERSION "V2.0.3"
-#define FW_VERSION "2.1.0" // PB Aug 26 changed weather source to open-meteo.com and added 4 day forecast
+#define FW_VERSION "V2.1.0" // PB Aug 26 see comments at the top of the file for the changes in this version.
 // Pin definitions (ESP-01):
 const uint8_t SDA_PIN = 0;           // I2C SDA connected to GPIO0
 const uint8_t SCL_PIN = 2;           // I2C SCL connected to GPIO2
@@ -66,7 +65,10 @@ const int ADDR_SSID = 0;
 const int ADDR_PASS = 70;
 const int ADDR_CITY = 140;
 const int ADDR_TZ   = 210;  //timezone offset
-const int ADDR_VARIABLES = 300;
+const int ADDR_LAT = 300;  // PB Aug 2026 storage for Latitude and Longiture for Open Meteo.com 
+const int ADDR_LON = 321;  // PB Aug 2026 storage for Latitude and Longiture for Open Meteo.com
+const int ADDR_VARIABLES = 420;  // 13 bytes of flags + contrast + dawn/dusk duration
+
 #define DEVICE_SIGNATURE '4'  //Change this byte to force the clock to ignore the current EEPROM configuration
 #define DEVICE_SIGNATURE_OLD '2'  //Previous signature; if found, loadSettings migrates it to the current layout
 const int ADDR_SIGNATURE = 500;  // 4-byte signature "CFGx" to indicate valid config, the "x" is the DEVICE_SIGNATURE define
@@ -472,6 +474,7 @@ void setup()
     weather_valid = false;
     Log.println(F("Setup complete, entering loop."));
   }
+  /*PB Aug 26 show current lat long on the display for 5 seconds so the user can see it */
   Log.println(F("Fetching initial weather..."));
   display.println("Fetching weather...");
   display.display();
@@ -928,7 +931,7 @@ void beginWebServer()
     page += "'></div>";
 
     // PB Aug 2026 New field for Position LAT and LONG 
-    page += "<div class='row'><label for='lat'>Latitude:</label>"
+    page += "<div class='row'><label for='lat'>Latitude:</label>";
     page += "<input id='lat' type='text' name='lat' value='" + htmlEscape(config_lat) + "' required></div>";
     page += "<div class='row'><label for='lon'>Longitude:</label>";
     page += "<input id='lon' type='text' name='lon' value='" + htmlEscape(config_lon) + "' required></div>";
@@ -1409,7 +1412,7 @@ static String jsonQuotedValue(const String &s, const char *key)
 }
 
 /********************************************************* */
-// PB 17Aug2026 changed to Open-Meteo from UK Met office   *
+// PB 17Aug2026 changed to Open-Meteo using UK Met office  *
 // --- Open-Meteo 4 JSON helpers added                     *
 /********************************************************* */
 
@@ -1561,12 +1564,9 @@ static String dayAbbrev(int y, int m, int d)
   return String(names[dow]);
 }
 
-
-
 /********************************************************* */
 // PB Aug 2026 end of additional json helper code segments
 /********************************************************** */
-
                        
 // Fetch firmware/latest.json from GitHub over HTTPS and compare its "version"
 // against FW_VERSION. Sets g_updateAvailable / g_latestVersion. GitHub speaks
@@ -1660,6 +1660,10 @@ void handleConfigForm()
   String tzSelect = server.arg("tz");          // preset or "MANUAL"
   String tzManual = server.arg("tz_manual");   // only meaningful if MANUAL
 
+// PB Aug 2026 Get new form fields  for LAT and LONG
+  String latStr = server.arg("lat");  // latitude as string
+  String lonStr = server.arg("lon");  // longitude as string
+
   // Existing fields
   bool   showSeconds = server.hasArg("showseconds"); // checkbox: present => true
   String units       = server.arg("units");          // "metric" or "imperial"
@@ -1689,8 +1693,11 @@ void handleConfigForm()
   Log.print(F(" city=")); Log.print(newCity);
   Log.print(F(" tz=")); Log.println(tzSelect);
 
+  Log.print(F("lat= ")); Log.print(latStr);
+  Log.print(F("lon= ")); Log.println(lonStr);
+
   // Basic validation
-  if (ssid.length() == 0 || newCity.length() == 0 || tzSelect.length() == 0)
+  if (ssid.length() == 0 || newCity.length()  == 0 || tzSelect.length() == 0 || latStr.length() == 0 || lonStr.length() == 0)
   {
     server.send(400, "text/html",
       "<html><body><h3>Invalid input, please fill all required fields.</h3></body></html>");
@@ -1791,6 +1798,10 @@ void handleConfigForm()
   config_wifiSSID = ssid;
   if (pass.length() > 0) config_wifiPass = pass;   // blank submit keeps the stored password
   config_city     = newCity;
+
+  // PB Aug2026 Save the new LAT and LONG into the variables for Open-Meteo
+  config_lat = latStr;
+  config_lon = lonStr;
 
   config_timezone        = finalTZ;
   config_timezone_manual = tzIsManual;
@@ -1900,6 +1911,9 @@ void loadSettings()
     config_wifiPass = "";
     config_city     = "";
 
+    config_lat = "51.5074";  // PB Aug2026 default London
+    config_lon = "-0.1278";  // PB Aug2026 default lat/lon
+
     config_timezone        = "UTC0";
     config_timezone_manual = false;
 
@@ -1941,6 +1955,10 @@ void loadSettings()
   config_wifiPass = eepromReadString(ADDR_PASS, MAX_PASS);
   config_city     = eepromReadString(ADDR_CITY, MAX_CITY);
   config_timezone = eepromReadString(ADDR_TZ,   MAX_TZ);
+
+  // pb aug 2026 Read lat/lon strings for open-meteo
+  config_lat = eepromReadString(ADDR_LAT, 20);  // max 20 chars for latitude
+  config_lon = eepromReadString(ADDR_LON, 20);  // max 20 chars for longitude  
 
   // --- Read packed booleans ---
   uint8_t flags = EEPROM.read(ADDR_VARIABLES);
@@ -2012,6 +2030,10 @@ void loadSettings()
   // Never log the actual Wi-Fi password (the log is exposed at /log over the LAN).
   Log.print(F("Password: ")); Log.println(config_wifiPass.length() ? F("********") : F("(none)"));
   Log.print(F("City: ")); Log.println(config_city);
+  //PB Aug 2026 print the current Lat and Long in the Log file.
+  Log.print(F("Latitude: ")); Log.println(config_lat);
+  Log.print(F("Longitude: ")); Log.println(config_lon);
+
   Log.print(F("Timezone select: ")); Log.println(config_timezone);
   Log.print(F("Timezone manual: ")); Log.println(config_timezone_manual ? "true" : "false");
   Log.print(F("Show seconds: ")); Log.println(config_showSeconds ? "true" : "false");
@@ -2085,6 +2107,11 @@ void saveSettings()
   eepromWriteString(ADDR_PASS, config_wifiPass, MAX_PASS);
   eepromWriteString(ADDR_CITY, config_city,     MAX_CITY);
   eepromWriteString(ADDR_TZ,   config_timezone, MAX_TZ);
+
+  // PB Aug 2026 save the LAT and LONG into the EEPROM 
+  eepromWriteString(ADDR_LAT, config_lat, 20);
+  eepromWriteString(ADDR_LON, config_lon, 20);
+
 
   // Pack booleans into one byte (flags)
   uint8_t flags = 0;
@@ -3080,9 +3107,9 @@ bool getWeather()
 
   // TODO: set this to your own location (e.g. via https://www.latlong.net/).
   // Thatcham, Berkshire:
-  // This is now a setable config value 
-  const float LATITUDE  = 51.399f;
-  const float LONGITUDE = -1.244f;
+  // This is now a settable config value 
+  float LATITUDE  = config_lat.toFloat();
+  float LONGITUDE = config_lon.toFloat();
 
   String url = "https://api.open-meteo.com/v1/forecast?latitude=" + String(LATITUDE, 4)  +
                "&longitude=" + String(LONGITUDE, 4) +
