@@ -25,10 +25,12 @@
  * All other text uses default font. Display is rotated 180 degrees (setRotation(2)).
  * 
  * PB Aug 26 2026: Replaced wttr.in by open-meteo.com as wttr.in was sending incorrect data.
- * Added a 4-day forecast functions screen
- * Position is now a configurable value (lat/lon) on the setup screen instead of a hardcoded location 
+ * Added a 4-day forecast functions screen.
+ * Position is now a configurable value on the Setup screen (LAT and LON, N & E +ve numbers, S & W -ve numbers).
+ * LAT and LON position is now shown on the startup screen after the setup IP address.
  * 
  */
+
 #include <EEPROM.h>
 #include <ESP8266WiFi.h>
 #include <ESP8266WebServer.h>
@@ -452,6 +454,11 @@ void setup()
         // the NTP + weather work below and we only pad whatever time is left.
         display.print("http://");
         display.println(WiFi.localIP());
+        // PB Aug 2026 show the LAT and LON for the user to see it on the display for 5 seconds
+        display.print("LAT: ");
+        display.println(config_lat);
+        display.print("LON: ");
+        display.println(config_lon);
         display.display();
         ipShownAt = millis();
       }
