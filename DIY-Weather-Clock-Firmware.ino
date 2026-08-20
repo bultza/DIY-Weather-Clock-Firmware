@@ -1371,7 +1371,8 @@ void handleCredits()
   page += "</style></head><body><div class='container'>";
   page += "<h2>Credits</h2><ul>";
   page += "<li>Firmware: <a href='https://github.com/bultza/DIY-Weather-Clock-Firmware' target='_blank'>DIY-Weather-Clock-Firmware</a> (" FW_VERSION ")</li>";
-  page += "<li>Weather data: <a href='https://github.com/chubin/wttr.in' target='_blank'>wttr.in</a></li>";
+  page += "<li>4 day forecast: Paul Bigwood and Claude AI tool</li>";
+  page += "<li>Weather data: <a href='https://open-meteo.com' target='_blank'>open-meteo</a></li>";
   page += "<li>Weather icons: <a href='https://github.com/Dhole/weather-pixel-icons' target='_blank'>Dhole's pixel weather icons</a> (CC BY-SA 4.0)</li>";
   page += "<li>Original firmware / inspiration: <a href='https://www.whynot.org.ua/en/electronic-kits/hu-061-diy-kit-wi-fi-weather-forecast-clock' target='_blank'>WHYNOT blog (HU-061 kit)</a></li>";
   page += "</ul><p><a href='/'>&larr; Back to configuration</a></p>";
