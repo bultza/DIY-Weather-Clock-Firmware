@@ -1,7 +1,10 @@
 # DIY-Weather-Clock-Firmware
 
-This is an Alternative firmware for the DIY Weather Clock WiFi kit that can be easily found on Amazon
-or AliExpress. The kit includes a plexiglass structure and three PCB boards:
+This is a fork of the alternative firmware written by Aitor Conde https://github.com/bultza that support Netatmo products
+https://github.com/bultza/DIY-Weather-Clock-Firmware
+
+This is an Alternative firmware for the DIY Weather Clock WiFi kit that can be easily found on Amazon or AliExpress.
+ The kit includes a plexiglass structure and three PCB boards:
 
 - An ESP-01S module with an ESP8266 MCU
 - An Adafruit OLED display (0.96", 128x64 px)
@@ -27,7 +30,7 @@ modified and cleaned up to:
 - support metric / imperial units
 - support real automatic daylight-saving time (DST)
 - support weather icons
-- support for **Netatmo** weather stations (this is optional)
+- support for **Ecowitt** weather stations, read locally over your LAN (this is optional)
 
 <div align="center">
 <img src="tools/screen_sim/screens.png" alt="Different possible Weather faces samples" width="80%"/>
@@ -49,7 +52,7 @@ If the signature is not found:
   - Metric / imperial units
   - Pressure unit (hPa or mmHg)
   - Seconds display
-  - Optionally, a **Netatmo** weather station (see the Netatmo section below)
+  - Optionally, an **Ecowitt** weather station (see the Ecowitt section below)
 
 <div align="center">
 <img src="docs/ESP8266_web_config.png" alt="Screenshot of the configuration website" width="50%"/>
@@ -61,7 +64,7 @@ Once configured and rebooted:
 - Time is synchronized using NTP pool servers
 - Timezone handling uses proper DST rules (not fixed offsets)
 - Weather data is retrieved from wttr.in every 15 minutes
-- If Netatmo is enabled, the outdoor temperature/humidity and pressure are taken
+- If Ecowitt is enabled, the outdoor temperature/humidity and pressure are read
   from your own station instead, also every 15 minutes (the condition, icon and sun times still come
   from wttr.in)
 - The configuration web portal stays available at the device's **IP (shown on the OLED at boot for 8 seconds)**, so you can reconfigure it from a browser at any time — no need
@@ -97,9 +100,9 @@ automatically without rebooting.
 - More display options: 12/24-hour time, DD/MM/YYYY or MM/DD/YYYY date, hide the '+' on positive temperatures
 - Configuration web portal always reachable on the network (reconfigure anytime)
 - Wi-Fi network scanner in the config portal (pick your SSID from a list)
-- Optional **Netatmo** integration: show outdoor temperature/humidity and pressure
-  from your own weather station
-- Status icons on the clock screen: a Wi-Fi signal meter and a Netatmo health mark
+- Optional **Ecowitt** integration: show outdoor temperature/humidity and pressure
+  from your own weather station, read locally from the gateway (no cloud, no keys)
+- Status icons on the clock screen: a Wi-Fi signal meter and an Ecowitt health mark
 - Serial log viewable from a web page (remote debugging without a cable)
 - Over-the-air (OTA) firmware updates from a web page (no cable after the first flash)
 - Automatic **update notification**: the clock checks GitHub for a newer version and
@@ -107,57 +110,52 @@ automatically without rebooting.
 - More predictable behavior
 
 
-## Netatmo (optional): use your own weather station
+## Ecowitt (optional): use your own weather station
 
 By default the clock gets all its weather from [wttr.in](https://wttr.in). If you
-own a [Netatmo](https://www.netatmo.com/) Weather Station you can have the clock
-show **your own measurements** instead: outdoor **temperature** and **humidity**
-(from the outdoor module) and **pressure** (from the indoor base station). The
-weather **condition**, the **icon** and the **sunrise/sunset** times still come
-from wttr.in — Netatmo doesn't provide those — so the two work together.
+own an [Ecowitt](https://www.ecowitt.com/) weather station (a gateway or console such
+as the GW1100 or GW2000, or any console that offers the local HTTP API) you can have
+the clock show **your own measurements** instead: outdoor **temperature** and
+**humidity** (from the outdoor sensor) and **pressure** (from the gateway's barometer).
+The weather **condition**, the **icon** and the **sunrise/sunset** times still come
+from wttr.in — the station doesn't provide those — so the two work together.
 
-If Netatmo is unreachable, the clock automatically falls back to the wttr.in
+The clock talks to the gateway **directly on your local network**, using the
+gateway's *local* HTTP API (`GET http://<gateway>/get_livedata_info`). There is
+no Ecowitt cloud account, no API key and no application key involved, and nothing
+leaves your LAN.
+
+If the station is unreachable, the clock automatically falls back to the wttr.in
 values, and the clock screen shows a small `!` next to the Wi-Fi meter (it shows
-a Netatmo "OK" (Netatmo icon) mark when the last update succeeded).
-
-### One-time setup at Netatmo
-
-Netatmo requires an OAuth2 app and a token. You create these once on Netatmo's
-developer site:
-
-1. Sign in at **https://dev.netatmo.com** with your normal Netatmo account.
-2. Go to **My Apps** and create an app (any name/description). Open it and note
-   its **Client ID** and **Client secret**.
-3. On the same app page, use the **Token generator**: tick the **`read_station`**
-   scope and generate a token. Copy the **refresh token** it gives you.
-   (The clock only needs the refresh token; it mints short-lived access tokens
-   from it automatically, and refreshes them every ~3 hours on its own.)
-
-> :warning: Treat the Client secret and refresh token like passwords — don't
-> share or commit them. If you ever leak them, regenerate the token / app.
+an "OK" mark when the last update succeeded).
 
 ### Configure the clock
 
-Open the config portal (the AP `Clock-ESP01-Setup` on first setup, or the
-device's IP afterwards) and:
-
-1. Tick **"Use Netatmo station"**.
-2. **Station/module name**: the name of your **outdoor module** as it appears in
-   the Netatmo app (e.g. `Terraza`, `Outdoor`, `Jardin`). Use an ASCII name
-   (accents like `Salón` aren't matched). Leave blank to use the first station.
-3. Paste the **Client ID**, **Client secret** and **Refresh token**.
+1. Find the **IP address of your gateway** (your router's device list, or the
+   Ecowitt app) and, ideally, give it a fixed IP / DHCP reservation in the router so
+   it never changes.
+2. Open the config portal (the AP `Clock-ESP01-Setup` on first setup, or the
+   clock's IP afterwards) and tick **"Use Ecowitt station"**.
+3. Type the gateway address in **Gateway IP/host** (e.g. `192.168.1.50`; a
+   `:port` suffix is accepted if you changed the port).
 4. Save. The clock reboots and starts overlaying your station's readings.
 
+To check that the gateway answers, open `http://<gateway-ip>/get_livedata_info` in a
+browser on the same network: you should see a JSON document with a `common_list`.
+
 Notes:
-- **Units:** Netatmo returns values in your Netatmo account's unit setting, used
-  as-is. Set your Netatmo account to the same temperature units (°C / °F) as the
-  clock, and its pressure to **mbar** (= hPa) — the clock then shows it in hPa or
-  mmHg according to the **Pressure unit** option, whichever the source.
-- For security the three credentials are **never shown back** in the portal:
-  leave a field blank to keep the stored value, or type a new value to replace
-  it (the Wi-Fi password works the same way).
-- The refresh token is rotated by Netatmo on every refresh; the clock saves the
-  new one automatically, so you don't need to touch it again.
+- **Units:** use whatever units your gateway is set to (°C / °F, hPa / inHg /
+  mmHg). The clock reads the unit the gateway reports and converts to the clock's
+  own units (the **Metric / imperial** and **Pressure unit** options).
+- **Which values:** outdoor temperature (`0x02`) and outdoor humidity (`0x07`) from
+  the gateway's `common_list`, and the **relative (sea-level) pressure** from the
+  `wh25` block. The relative pressure follows the altitude/offset you configured in
+  the gateway. Extra channel sensors (WN34, WH31, ...) are not used.
+- Only the gateway's **local HTTP API** is used. It must be reachable from the
+  clock's Wi-Fi network (the same LAN/VLAN) and not blocked by client isolation.
+- **Upgrading from the Netatmo version:** Netatmo support was removed. On the first
+  boot the stored Netatmo credentials are erased from flash and the station option
+  starts disabled, so just enable Ecowitt in the portal.
 
 
 ## What you need to compile and install

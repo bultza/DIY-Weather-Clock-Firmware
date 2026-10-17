@@ -2,7 +2,7 @@
 """Bit-for-bit simulation of the clock's two OLED screens (128x64, 1-bit).
 
 Mirrors drawTimeScreen() / drawWeatherScreen() in the firmware exactly (incl. the
-clock-screen WiFi meter + Netatmo status mark from drawTopStatusIcons()), using
+clock-screen WiFi meter + Ecowitt status mark from drawTopStatusIcons()), using
 the real Adafruit GFX fonts (gfx.py) and the real weather icons (../icon_sim).
 Produces a labeled PNG montage of several example states.
 
@@ -55,8 +55,8 @@ def icon_for_code(code, night):
     return icon_bytes(name, night)
 
 
-# 8x8 "Netatmo OK" glyph — identical bytes to netatmoOkIcon[] in the firmware.
-NETATMO_OK_ICON = [0x18, 0x3C, 0x7E, 0xFF, 0xFF, 0xFF, 0xC3, 0x81]
+# 8x8 "Ecowitt OK" glyph — identical bytes to stationOkIcon[] in the firmware.
+STATION_OK_ICON = [0x18, 0x3C, 0x7E, 0xFF, 0xFF, 0xFF, 0xC3, 0x81]
 
 # 8x8 heart, two frames — identical bytes to heartSmall[]/heartBig[] in the
 # firmware. Alternated (lub-dub) as the "firmware update available" indicator.
@@ -76,11 +76,11 @@ def draw_update_heart(d, heart):
     d.bitmap(0, 0, HEART_BIG if heart == "big" else HEART_SMALL, 8, 8)
 
 
-def draw_status_icons(d, wifi_bars, netatmo):
-    """Mirror drawTopStatusIcons(): top-right WiFi meter + Netatmo mark.
+def draw_status_icons(d, wifi_bars, station):
+    """Mirror drawTopStatusIcons(): top-right WiFi meter + Ecowitt mark.
 
     wifi_bars: 0-4 (how many of the 4 ascending bars are lit).
-    netatmo:   None (disabled / nothing), "ok" (the glyph), or "error" (a '!').
+    station:   None (disabled / nothing), "ok" (the glyph), or "error" (a '!').
     """
     bw, gap, base_y = 2, 1, 8
     x0 = 128 - (4 * bw + 3 * gap)          # right-aligned = 117
@@ -92,11 +92,11 @@ def draw_status_icons(d, wifi_bars, netatmo):
                 for dy in range(hgt):
                     d.pixel(x + dx, base_y - hgt + dy)
 
-    if netatmo:
+    if station:
         nx = x0 - 10                       # 8px icon + 2px gap before the meter
-        if netatmo == "ok":
-            d.bitmap(nx, 0, NETATMO_OK_ICON, 8, 8)
-        elif netatmo == "error":
+        if station == "ok":
+            d.bitmap(nx, 0, STATION_OK_ICON, 8, 8)
+        elif station == "error":
             d.setFont(None)
             d.setCursor(nx + 2, 0)
             d.print("!")
@@ -107,9 +107,9 @@ def draw_status_icons(d, wifi_bars, netatmo):
 # --------------------------------------------------------------------------
 def time_screen(day_name, hh, mm, ss=None, ampm=None,
                 temp_line="N/A", date_str="04/06/2026",
-                wifi_bars=4, netatmo=None, heart=None):
+                wifi_bars=4, station=None, heart=None):
     """ss/ampm None => not shown. temp_line is the full bottom-left string.
-    wifi_bars (0-4) and netatmo (None/"ok"/"error") drive the top status icons.
+    wifi_bars (0-4) and station (None/"ok"/"error") drive the top status icons.
     heart (None/"small"/"big") draws the update indicator, top-left."""
     d = Display()
     show_seconds = ss is not None
@@ -166,7 +166,7 @@ def time_screen(day_name, hh, mm, ss=None, ampm=None,
     d.print(date_str)
 
     d.hline(0, 52, 128)
-    draw_status_icons(d, wifi_bars, netatmo)
+    draw_status_icons(d, wifi_bars, station)
     draw_update_heart(d, heart)
     return d
 
@@ -288,33 +288,33 @@ def examples():
     out.append(("Update heart BIG (systole/beat) - clock",
                 time_screen("Wednesday", 14, 9,
                             temp_line="+22" + DEG + "C 55%", date_str="04/06/2026",
-                            wifi_bars=4, netatmo="ok", heart="big")))
+                            wifi_bars=4, station="ok", heart="big")))
     out.append(("Update heart small (diastole/rest) - clock",
                 time_screen("Wednesday", 14, 9,
                             temp_line="+22" + DEG + "C 55%", date_str="04/06/2026",
-                            wifi_bars=4, netatmo="ok", heart="small")))
+                            wifi_bars=4, station="ok", heart="small")))
     out.append(("Update heart BIG (beat) - weather",
                 weather_screen("Madrid", "22", "C", "Sunny",
                                "H:40% 12km/h 1014hPa", code=113, night=False, heart="big")))
     out.append(("Update heart small (rest) - weather",
                 weather_screen("Bilbao", "14", "C", "Light rain",
                                "H:88% 20km/h 1008hPa", code=296, night=False, heart="small")))
-    # --- Clock faces (top-right: WiFi meter + Netatmo mark) ---
-    out.append(("Clock 24h, WiFi full + Netatmo OK",
+    # --- Clock faces (top-right: WiFi meter + Ecowitt mark) ---
+    out.append(("Clock 24h, WiFi full + Ecowitt OK",
                 time_screen("Wednesday", 14, 9,
                             temp_line="+22" + DEG + "C 55%", date_str="04/06/2026",
-                            wifi_bars=4, netatmo="ok")))
-    out.append(("Clock 12h + seconds, Netatmo OK",
+                            wifi_bars=4, station="ok")))
+    out.append(("Clock 12h + seconds, Ecowitt OK",
                 time_screen("Sunday", 9, 7, ss=5, ampm="AM",
                             temp_line="+18" + DEG + "C 60%", date_str="06/04/2026",
-                            wifi_bars=3, netatmo="ok")))
-    out.append(("Clock 24h + seconds, Netatmo ERROR (!)",
+                            wifi_bars=3, station="ok")))
+    out.append(("Clock 24h + seconds, Ecowitt ERROR (!)",
                 time_screen("Friday", 23, 41, ss=58,
                             temp_line="+7" + DEG + "C 80%", date_str="12/12/2026",
-                            wifi_bars=2, netatmo="error")))
-    out.append(("Clock, weak WiFi, Netatmo disabled",
+                            wifi_bars=2, station="error")))
+    out.append(("Clock, weak WiFi, Ecowitt disabled",
                 time_screen("Monday", 6, 30, temp_line="N/A", date_str="01/01/2027",
-                            wifi_bars=1, netatmo=None)))
+                            wifi_bars=1, station=None)))
     # --- Weather faces (with icons) ---
     out.append(("Weather: Sunny (113, day)",
                 weather_screen("Madrid", "22", "C", "Sunny",

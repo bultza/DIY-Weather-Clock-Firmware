@@ -2,7 +2,7 @@
 
 Bit-for-bit simulator of the clock's 128x64 monochrome OLED. It re-implements the
 slice of Adafruit_GFX + SSD1306 the firmware uses and mirrors `drawTimeScreen()` /
-`drawWeatherScreen()` (including the clock-screen WiFi meter + Netatmo status mark
+`drawWeatherScreen()` (including the clock-screen WiFi meter + Ecowitt status mark
 from `drawTopStatusIcons()`), so the rendered pixels match what the real display
 shows. Handy for previewing layout changes without flashing hardware.
 
@@ -40,7 +40,7 @@ python render.py --out x.png  # choose the output path
 
 Open `screens.png` to see the simulated screens. Edit the `examples()` list in
 `render.py` to add/adjust cases — `time_screen(...)` takes `wifi_bars` (0-4) and
-`netatmo` (`None` / `"ok"` / `"error"`) to exercise the status icons.
+`station` (`None` / `"ok"` / `"error"`) to exercise the status icons.
 
 ## Is `_fonts/` committed? No.
 
@@ -53,6 +53,6 @@ generated preview; regenerate it rather than relying on a committed copy.
 
 ## Relation to the firmware
 
-This tool is **not** part of the firmware build. The `netatmoOkIcon` bytes and all
+This tool is **not** part of the firmware build. The `stationOkIcon` bytes and all
 layout coordinates are duplicated from the `.ino` by hand; if you change a screen
 layout or the status-icon glyph in the firmware, update `render.py` to match.
