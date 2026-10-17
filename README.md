@@ -1,7 +1,10 @@
 # DIY-Weather-Clock-Firmware
 
-This is an Alternative firmware for the DIY Weather Clock WiFi kit that can be easily found on Amazon
-or AliExpress. The kit includes a plexiglass structure and three PCB boards:
+This is a fork of the alternative firmware written by Aitor Conde https://github.com/bultza that support Netatmo products
+https://github.com/bultza/DIY-Weather-Clock-Firmware
+
+This is an Alternative firmware for the DIY Weather Clock WiFi kit that can be easily found on Amazon or AliExpress.
+ The kit includes a plexiglass structure and three PCB boards:
 
 - An ESP-01S module with an ESP8266 MCU
 - An Adafruit OLED display (0.96", 128x64 px)
